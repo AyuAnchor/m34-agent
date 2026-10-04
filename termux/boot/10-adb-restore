@@ -1,0 +1,43 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# After a reboot adbd forgets port 5555. Find the Wireless debugging port on localhost,
+# switch adbd back to 5555, then re-enable Wireless debugging so the next reboot can recover too.
+LOG=$HOME/.adb-restore.log
+FIXED=127.0.0.1:5555
+
+online() { [ "$(adb -s "$1" get-state 2>/dev/null)" = device ]; }
+
+# Switching adbd to 5555 restarts it, which kills the adb-started Shizuku server. Start it again.
+restart_shizuku() {
+    lib=$(adb -s "$FIXED" shell pm path moe.shizuku.privileged.api | head -1 | sed "s/^package://; s/base.apk$//")lib/arm64/libshizuku.so
+    adb -s "$FIXED" shell "$lib" >/dev/null 2>&1
+}
+
+restore() {
+    for port in $(nmap -p 30000-65535 --open -oG - 127.0.0.1 2>/dev/null | grep -oE "[0-9]+/open" | cut -d/ -f1); do
+        [ "$port" = 5555 ] && continue
+        adb connect "127.0.0.1:$port" >/dev/null 2>&1
+        if online "127.0.0.1:$port"; then
+            adb -s "127.0.0.1:$port" tcpip 5555 >/dev/null 2>&1
+            sleep 4
+            adb connect "$FIXED" >/dev/null 2>&1
+            online "$FIXED" || return 1
+            adb -s "$FIXED" shell settings put global adb_wifi_enabled 1
+            restart_shizuku
+            return 0
+        fi
+        adb disconnect "127.0.0.1:$port" >/dev/null 2>&1
+    done
+    return 1
+}
+
+adb start-server >/dev/null 2>&1
+
+for _ in $(seq 60); do
+    adb connect "$FIXED" >/dev/null 2>&1
+    if online "$FIXED" || restore; then
+        echo "$(date) adb ready on 5555" >> "$LOG"
+        exit 0
+    fi
+    sleep 10
+done
+echo "$(date) gave up: Wireless debugging port not found" >> "$LOG"

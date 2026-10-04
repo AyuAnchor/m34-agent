@@ -1,0 +1,583 @@
+#!/usr/bin/env python3
+"""Telegram bridge: the owner's messages become tasks for the phone agent."""
+import json
+import logging
+import logging.handlers
+import os
+import queue
+import secrets
+import threading
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from agent import Agent, Router
+from commands import QuickCommands, parse_duration, plain
+from device import Device, adb, getprop, is_temporary, ready_to_send
+from net import ConnectionPool
+from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
+from updater import current_version, self_update
+from watch import MotionWatch
+
+HOME = Path.home()
+REPO_DIR = Path(__file__).resolve().parent.parent  # the git checkout the bot runs from
+CONFIG_PATH = HOME / ".config/tg-bridge/config.json"
+STATE_DIR = HOME / ".cache/tg-bridge"
+HISTORY_PATH = STATE_DIR / "history.json"
+MAX_HISTORY = 20
+MAX_MESSAGE = 4000
+APPROVAL_TIMEOUT_S = 15 * 60
+PROGRESS_LINES = 8
+PROGRESS_EDIT_S = 2.0
+SCHEDULER_TICK_S = 20
+WARM_EVERY_S = 120  # keep a fresh connection to Telegram and each AI provider ready
+ADB_GRACE_S = 6 * 60  # after a reboot, adb on 5555 normally returns within ~3 minutes
+WIRELESS_GUARD_S = 60  # how often to check that wireless debugging is on and trusted
+BATTERY_CHECK_S = 120
+BATTERY_LOW = 15  # alert below this %
+BATTERY_REARM = 20  # ...and alert again only after it has been back at or above this %
+OWNER_SCREEN_PATH = Path("/tmp/owner-screen.jpg")
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
+UPLOAD_KINDS = {  # file suffix -> (Bot API method, form field)
+    **dict.fromkeys((".jpg", ".jpeg", ".png", ".webp"), ("sendPhoto", "photo")),
+    **dict.fromkeys((".mp4", ".mov", ".3gp", ".mkv"), ("sendVideo", "video")),
+    **dict.fromkeys((".m4a", ".mp3", ".aac", ".wav", ".ogg"), ("sendAudio", "audio")),
+}
+BUILT_IN_COMMANDS = [  # (command, description) shown in /help and Telegram's command menu
+    ("status", "What I'm doing right now"),
+    ("screen", "Screenshot of the phone, right now"),
+    ("memory", "What I remember (/forget N deletes note N)"),
+    ("schedules", "Scheduled tasks (/unschedule N cancels one)"),
+    ("shortcuts", "Saved shortcuts (/delshortcut N deletes one)"),
+    ("usage", "AI requests today vs the free daily limits"),
+    ("watch", "Message me if anything moves: /watch 10m [front|back]"),
+    ("unwatch", "Stop the motion watch"),
+    ("new", "Forget the conversation and start fresh"),
+    ("stop", "Stop the current task and clear the queue"),
+    ("update", "Pull the latest code from GitHub and restart"),
+]
+
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.handlers.RotatingFileHandler(STATE_DIR / "bridge.log", maxBytes=1_000_000, backupCount=2),
+    ],
+)
+log = logging.getLogger("bridge")
+
+
+def load_json(path: Path, default: Any) -> Any:
+    return read_json(path, default)
+
+
+def save_json(path: Path, data: Any) -> None:
+    write_atomically(path, json.dumps(data, indent=2))
+
+
+class Telegram:
+    """Bot API client over a shared pool of open connections."""
+
+    def __init__(self, token: str) -> None:
+        self.path = f"/bot{token}"
+        self.pool = ConnectionPool("api.telegram.org")
+
+    def post(self, method: str, body: bytes, content_type: str, http_timeout: float) -> Any:
+        _, _, data = self.pool.request(f"{self.path}/{method}", body, {"Content-Type": content_type}, http_timeout)
+        payload = json.loads(data)
+        if not payload.get("ok"):
+            raise RuntimeError(f"{method} failed: {payload.get('description')}")
+        return payload["result"]
+
+    def call(self, method: str, http_timeout: float = 30, **params: Any) -> Any:
+        return self.post(method, json.dumps(params).encode(), "application/json", http_timeout)
+
+    def send(self, chat_id: int, text: str, **extra: Any) -> None:
+        text = text or "(empty reply)"
+        for start in range(0, len(text), MAX_MESSAGE):
+            self.call("sendMessage", chat_id=chat_id, text=text[start:start + MAX_MESSAGE], **extra)
+
+    def send_file(self, chat_id: int, path: Path, caption: str) -> None:
+        """Upload a photo, video or any other file (as a document)."""
+        if path.stat().st_size > MAX_UPLOAD_BYTES:
+            raise ValueError(f"{path.name} is over Telegram's 50 MB bot upload limit.")
+        method, field_name = UPLOAD_KINDS.get(path.suffix.lower(), ("sendDocument", "document"))
+        boundary = secrets.token_hex(16)
+
+        def field(name: str, value: str) -> bytes:
+            return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+
+        body = (
+            field("chat_id", str(chat_id))
+            + field("caption", caption[:1000])
+            + f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}"; filename="{path.name}"\r\n'
+              f"Content-Type: application/octet-stream\r\n\r\n".encode()
+            + path.read_bytes()
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
+        self.post(method, body, f"multipart/form-data; boundary={boundary}", 300)
+
+
+class Bridge:
+    def __init__(self) -> None:
+        self.config = load_json(CONFIG_PATH, {})
+        self.tg = Telegram(self.config["token"])
+        self.owner: int | None = self.config.get("owner_id")
+        self.pair_code = None if self.owner else secrets.token_hex(3)
+        self.tasks: queue.Queue[tuple[str, float]] = queue.Queue()  # (task, when the owner sent it)
+        self.busy = False
+        self.cancel = threading.Event()
+        self.approvals: dict[str, tuple[threading.Event, list[bool]]] = {}
+        self.task = ""
+        self.started = 0.0
+        self.actions: list[str] = []
+        self.model = ""
+        self.progress_id: int | None = None
+        self.last_edit = 0.0
+        self.device = Device()
+        self.quick = QuickCommands(self.device)
+        self.device_lock = threading.Lock()  # one user of the screen at a time: a task, a quick command or a watch
+        self.watch = MotionWatch(
+            self.device, self.device_lock, self.notify, lambda path, caption: self.tg.send_file(self.owner, path, caption)
+        )
+        self.memory = Memory()
+        self.usage = Usage()
+        self.schedules = Schedules(getprop("persist.sys.timezone") or "UTC")
+        self.shortcuts = Shortcuts()
+        self.agent = Agent(
+            Router(self.config.get("providers", {}), notify=self.notify, usage=self.usage),
+            self.device,
+            self.memory,
+            self.schedules,
+            self.shortcuts,
+            self.watch,
+            self.device_lock,
+            ask_owner=self.ask_owner,
+            send_file=lambda path, caption: self.tg.send_file(self.owner, path, caption),
+            notify=self.notify,
+            on_step=self.show_typing,
+            on_action=self.on_action,
+            cancelled=self.cancel.is_set,
+        )
+
+    def notify(self, text: str) -> None:
+        if self.owner:
+            self.tg.send(self.owner, text)
+
+    def show_typing(self) -> None:
+        """Telegram's "typing..." indicator, sent in the background so it never delays a step."""
+
+        def send() -> None:
+            try:
+                self.tg.call("sendChatAction", chat_id=self.owner, action="typing")
+            except Exception as error:
+                log.debug(f"typing indicator skipped: {error}")
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def keep_warm(self) -> None:
+        while True:
+            for pool in (self.tg.pool, *self.agent.router.pools.values()):
+                pool.refresh()
+            time.sleep(WARM_EVERY_S)
+
+    def help_text(self) -> str:
+        quick = "\n".join(f"{c.usage} - {c.description}" for c in self.quick.table.values())
+        built_in = "\n".join(f"/{name} - {description}" for name, description in BUILT_IN_COMMANDS)
+        return (
+            "Send me a task in plain words and I'll do it on the phone.\n\n"
+            f"Instant commands (no AI):\n{quick}\n\nControl:\n{built_in}"
+        )
+
+    def register_commands(self) -> None:
+        """Fill Telegram's "/" menu."""
+        quick = [(name, c.description) for name, c in self.quick.table.items()]
+        commands = [{"command": name, "description": text} for name, text in BUILT_IN_COMMANDS + quick]
+        self.tg.call("setMyCommands", commands=commands)
+
+    def run_quick(self, name: str, args: str) -> None:
+        command = self.quick.table[name]
+
+        def run() -> None:
+            if command.changes_device and not self.device_lock.acquire(blocking=False):
+                self.tg.send(self.owner, "Busy: a task or motion watch is using the phone. Wait, or /stop it.")
+                return
+            start = time.time()
+            try:
+                if command.changes_device and name != "screenoff":
+                    self.device.wake()
+                reply = command.run(args)
+                if reply.file:
+                    sendable = ready_to_send(reply.file)
+                    try:
+                        self.tg.send_file(self.owner, sendable, "")
+                    finally:
+                        for temporary in {reply.file, sendable}:
+                            if is_temporary(temporary):
+                                temporary.unlink(missing_ok=True)
+                if reply.text:
+                    self.tg.send(self.owner, plain(reply.text))
+                log.info(f"/{name} done in {time.time() - start:.1f}s")
+            except Exception as error:
+                log.exception(f"/{name} failed")
+                self.notify(f"/{name} failed: {error}")
+            finally:
+                if command.changes_device:
+                    self.device_lock.release()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def poll(self) -> None:
+        offset = 0
+        while True:
+            try:
+                updates = self.tg.call(
+                    "getUpdates",
+                    http_timeout=70,
+                    offset=offset,
+                    timeout=50,
+                    allowed_updates=["message", "callback_query"],
+                )
+            except Exception as error:  # the phone's network drops; keep retrying
+                log.warning(f"poll failed: {error}")
+                time.sleep(5)
+                continue
+            for update in updates:
+                offset = update["update_id"] + 1
+                try:
+                    self.handle(update)
+                except Exception:
+                    log.exception("failed to handle update")
+
+    def handle(self, update: dict[str, Any]) -> None:
+        if "callback_query" in update:
+            self.handle_callback(update["callback_query"])
+            return
+        message = update.get("message") or {}
+        text = (message.get("text") or "").strip()
+        user_id = message.get("from", {}).get("id")
+        if not text or user_id is None or message.get("chat", {}).get("type") != "private":
+            return
+        if self.owner is None:
+            self.try_pair(user_id, text)
+        elif user_id != self.owner:
+            log.warning(f"ignored message from user {user_id}")
+        elif text in ("/start", "/help"):
+            self.tg.send(self.owner, self.help_text())
+        elif text == "/status":
+            start = time.time()
+            self.tg.send(self.owner, self.status())
+            log.info(f"/status answered in {time.time() - start:.1f}s")
+        elif text == "/screen":
+            self.send_screen()
+        elif text == "/memory":
+            self.tg.send(self.owner, self.memory.listing() or "I don't remember anything yet.")
+        elif text == "/schedules":
+            self.tg.send(self.owner, self.schedules.listing() or "No scheduled tasks.")
+        elif text == "/usage":
+            self.tg.send(self.owner, self.usage_report())
+        elif text == "/shortcuts":
+            self.tg.send(self.owner, self.shortcuts.listing() or "No shortcuts saved yet.")
+        elif text.split()[0] in ("/forget", "/unschedule", "/delshortcut"):
+            command, _, number = text.partition(" ")
+            store = {"/forget": self.memory, "/unschedule": self.schedules, "/delshortcut": self.shortcuts}[command]
+            removed = number.strip().isdigit() and store.remove(int(number))
+            self.tg.send(self.owner, "Deleted." if removed else "No such number. Check /memory, /schedules or /shortcuts.")
+        elif text == "/new":
+            HISTORY_PATH.unlink(missing_ok=True)
+            self.tg.send(self.owner, "Conversation cleared.")
+        elif text.split()[0] == "/watch":
+            self.tg.send(self.owner, self.start_watch(text.partition(" ")[2]))
+        elif text == "/unwatch":
+            self.tg.send(self.owner, self.watch.stop())
+        elif text == "/stop":
+            self.stop()
+        elif text == "/update":
+            self.update()
+        elif text.startswith("/") and (name := text[1:].split()[0].split("@")[0].lower()) in self.quick.table:
+            self.run_quick(name, text.partition(" ")[2].strip())
+        elif text.startswith("/"):  # a typo'd command shouldn't become an AI task
+            self.tg.send(self.owner, "Unknown command. Send /help for the list.")
+        else:
+            if self.busy or not self.tasks.empty():
+                self.tg.send(self.owner, "Still working on the previous task. Queued this one.")
+            self.tasks.put((text, message.get("date") or time.time()))
+
+    def try_pair(self, user_id: int, text: str) -> None:
+        if text != f"/pair {self.pair_code}":
+            return
+        self.owner = user_id
+        self.config["owner_id"] = user_id
+        save_json(CONFIG_PATH, self.config)
+        self.pair_code = None
+        (STATE_DIR / "pair_code").unlink(missing_ok=True)
+        log.info(f"paired with user {user_id}")
+        self.tg.send(user_id, f"Paired. Only you can control this phone now.\n\n{self.help_text()}")
+
+    def elapsed(self) -> str:
+        seconds = int(time.time() - self.started)
+        return f"{seconds // 60}m {seconds % 60}s"
+
+    def status(self) -> str:
+        queued = self.tasks.qsize()
+        watching = f"\nMotion watch: {self.watch.summary}." if self.watch.active else ""
+        if not self.busy:
+            return (f"Idle. {queued} queued." if queued else "Idle.") + watching
+        last = self.actions[-1] if self.actions else "thinking"
+        waiting = "\nWaiting for your approval." if self.approvals else ""
+        return (
+            f"Working on: {self.task[:300]}\n"
+            f"Running {self.elapsed()}, {len(self.actions)} steps, model {self.model or 'starting'}.\n"
+            f"Last action: {last[:200]}{waiting}\n"
+            f"Queued: {queued}{watching}"
+        )
+
+    def send_screen(self) -> None:
+        def capture() -> None:
+            start = time.time()
+            try:
+                self.device.snapshot(OWNER_SCREEN_PATH)
+                self.tg.send_file(self.owner, OWNER_SCREEN_PATH, "Current screen")
+                log.info(f"/screen sent in {time.time() - start:.1f}s")
+            except Exception as error:
+                self.notify(f"Screenshot failed: {error}")
+
+        threading.Thread(target=capture, daemon=True).start()
+
+    def post_progress(self) -> None:
+        """The live progress message appears with the first action, so plain chat gets its reply sooner."""
+        try:
+            sent = self.tg.call("sendMessage", chat_id=self.owner, text=f"Working: {self.task[:200]}")
+            self.progress_id = sent["message_id"]
+        except Exception:
+            log.exception("could not post progress message")
+
+    def on_action(self, model: str, action: str) -> None:
+        self.model = model
+        self.actions.append(action)
+        if len(self.actions) == 1:
+            self.post_progress()
+        if time.time() - self.last_edit >= PROGRESS_EDIT_S:
+            self.update_progress("Working")
+
+    def update_progress(self, headline: str) -> None:
+        if self.progress_id is None:
+            return
+        steps = self.actions[-PROGRESS_LINES:]
+        first = len(self.actions) - len(steps) + 1
+        lines = "\n".join(f"{first + i}. {step[:120]}" for i, step in enumerate(steps))
+        text = (
+            f"{headline}: {self.task[:200]}\n"
+            f"{self.elapsed()} · {len(self.actions)} steps · {self.model or 'starting'}\n\n{lines}"
+        )
+        try:
+            self.tg.call("editMessageText", chat_id=self.owner, message_id=self.progress_id, text=text.strip())
+            self.last_edit = time.time()
+        except Exception as error:  # unchanged text or a network blip; the next edit catches up
+            log.debug(f"progress edit skipped: {error}")
+
+    def update(self) -> None:
+        def run() -> None:
+            if self.busy or self.watch.active:
+                self.tg.send(self.owner, "Busy (a task or motion watch is running). Send /update again when idle.")
+                return
+            try:
+                result = self_update(REPO_DIR)
+            except Exception as error:
+                log.exception("update failed")
+                self.notify(f"Update failed: {error}")
+                return
+            self.tg.send(self.owner, result.message)
+            if result.restart:
+                log.info("exiting to restart into the updated code")
+                os._exit(0)  # runit starts the service again, now running the new code
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def start_watch(self, args: str) -> str:
+        words = args.lower().split()
+        duration = next((w for w in words if w not in ("front", "back", "rear")), "5m")
+        seconds = parse_duration(duration, 60)
+        if not seconds:
+            return "Usage: /watch 10m [front|back]  (90s, 10m, 1h; a plain number means minutes)"
+        return self.watch.start(seconds, front="front" in words)
+
+    def stop(self) -> None:
+        if self.watch.active:
+            self.watch.stop()
+        while not self.tasks.empty():
+            self.tasks.get_nowait()
+        if self.busy:
+            self.cancel.set()
+            for event, _ in list(self.approvals.values()):
+                event.set()
+        self.tg.send(self.owner, "Stopping.")
+
+    def ask_owner(self, action: str) -> bool:
+        req_id = secrets.token_hex(8)
+        event, verdict = threading.Event(), [False]
+        self.approvals[req_id] = (event, verdict)
+        buttons = [[
+            {"text": "Approve", "callback_data": f"ok:{req_id}"},
+            {"text": "Deny", "callback_data": f"no:{req_id}"},
+        ]]
+        try:
+            self.tg.send(self.owner, f"Allow this?\n{action[:1500]}", reply_markup={"inline_keyboard": buttons})
+            if not event.wait(APPROVAL_TIMEOUT_S):
+                self.tg.send(self.owner, "No answer in 15 minutes, so I skipped it.")
+            return verdict[0]
+        finally:
+            self.approvals.pop(req_id, None)
+
+    def handle_callback(self, query: dict[str, Any]) -> None:
+        if query.get("from", {}).get("id") != self.owner:
+            return
+        choice, _, req_id = (query.get("data") or "").partition(":")
+        pending = self.approvals.get(req_id)
+        if pending and choice in ("ok", "no") and not pending[0].is_set():
+            pending[1][0] = choice == "ok"
+            pending[0].set()
+            label = "Approved" if choice == "ok" else "Denied"
+        else:
+            label = "Expired"
+        self.tg.call("answerCallbackQuery", callback_query_id=query["id"], text=label)
+        message = query.get("message")
+        if message:
+            self.tg.call(
+                "editMessageText",
+                chat_id=message["chat"]["id"],
+                message_id=message["message_id"],
+                text=f"{message.get('text', '')}\n\n{label}",
+            )
+
+    def work(self) -> None:
+        while True:
+            task, sent_at = self.tasks.get()
+            self.busy = True
+            self.cancel.clear()
+            self.task, self.started, self.actions, self.model = task, time.time(), [], ""
+            log.info(f"task: {task[:200]} (reached the bot ~{self.started - sent_at:.0f}s after sending)")
+            try:
+                history = load_json(HISTORY_PATH, [])
+                reply = self.agent.run(history, task)
+                history += [{"role": "user", "content": task}, {"role": "assistant", "content": reply}]
+                save_json(HISTORY_PATH, history[-MAX_HISTORY:])
+                self.tg.send(self.owner, reply)
+                log.info(f"replied {time.time() - self.started:.1f}s after starting, {len(self.actions)} actions")
+            except Exception as error:
+                log.exception("task failed")
+                self.notify(f"Task failed: {error}")
+            finally:
+                self.update_progress("Stopped" if self.cancel.is_set() else "Finished")
+                self.progress_id = None
+                self.busy = False
+
+    def usage_report(self) -> str:
+        now = time.time()
+        reset = (datetime.now(PACIFIC) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        local_reset = reset.astimezone(self.schedules.tz).strftime("%H:%M")
+        counts = self.usage.today()
+        lines = [f"AI requests today (counted by the bot; daily quotas reset at {local_reset} your time):"]
+        for model in self.agent.router.models:
+            used, limited = counts.get(model.label, [0, 0])
+            line = f"{model.label}: {used}/{model.daily}"
+            if limited:
+                line += f", {limited} refused for limits"
+            if model.cooldown_until > now:
+                until = datetime.fromtimestamp(model.cooldown_until, self.schedules.tz).strftime("%H:%M")
+                line += f" (paused until {until})"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def monitor_battery(self) -> None:
+        """Message the owner once when the battery drops below BATTERY_LOW, and when it has recovered."""
+        alerted = False
+        while True:
+            time.sleep(BATTERY_CHECK_S)
+            try:
+                status = self.device.battery_status()
+            except Exception:
+                log.exception("battery check failed")
+                continue
+            if status is None or self.owner is None:
+                continue
+            level, charging = status
+            if level < BATTERY_LOW and not alerted:
+                state = "charging" if charging else "not charging; is the charger unplugged or the power off?"
+                self.notify(f"Battery low: {level}% ({state}). I'll stop working when it runs out.")
+                log.info(f"low battery alert at {level}%")
+                alerted = True
+            elif level >= BATTERY_REARM and alerted:
+                self.notify(f"Battery back up to {level}%.")
+                alerted = False
+
+    def check_phone_control(self) -> None:
+        """After a start (usually a reboot), tell the owner if screen control doesn't come back."""
+        deadline = time.time() + ADB_GRACE_S
+        while time.time() < deadline:
+            if adb("get-state").stdout.decode().strip() == "device":
+                return
+            time.sleep(15)
+        if self.owner:
+            self.notify(
+                "I restarted but can't control the screen yet (adb didn't come back). Chat still works. "
+                "Most likely the phone is on a Wi-Fi network it hasn't used before, where Android asks "
+                "\"Allow wireless debugging on this network?\". Fix: plug the phone into your computer and run "
+                "`adb tcpip 5555`, then allow wireless debugging once on that network."
+            )
+
+    def guard_wireless_debugging(self) -> None:
+        """Keep wireless debugging on and trusted on whatever Wi-Fi the phone is on, so a reboot there
+        can recover by itself (Android asks per network, and nobody can answer at boot)."""
+        while True:
+            time.sleep(WIRELESS_GUARD_S)
+            if not self.device_lock.acquire(blocking=False):
+                continue  # a task or command is using the screen; try again next round
+            try:
+                if note := self.device.ensure_wireless_debugging():
+                    log.info(note)
+                    self.notify(note)
+            except Exception:
+                log.exception("wireless debugging guard failed")
+            finally:
+                self.device_lock.release()
+
+    def run_schedules(self) -> None:
+        while True:
+            time.sleep(SCHEDULER_TICK_S)
+            if self.owner is None:
+                continue
+            try:
+                for item in self.schedules.pop_due():
+                    log.info(f"scheduled task #{item['id']} is due")
+                    self.tasks.put((f"[Scheduled #{item['id']}] {item['task']}", time.time()))
+            except Exception:
+                log.exception("scheduler failed")
+
+
+def main() -> None:
+    try:
+        log.info(f"starting, code version {current_version(REPO_DIR)}")
+    except Exception:
+        log.info("starting (not running from a git checkout)")
+    bridge = Bridge()
+    if bridge.pair_code:
+        (STATE_DIR / "pair_code").write_text(bridge.pair_code)
+        log.info(f"not paired yet: send '/pair {bridge.pair_code}' to the bot")
+    try:
+        bridge.register_commands()
+    except Exception as error:  # cosmetic; the bot works without the menu
+        log.warning(f"could not register the command menu: {error}")
+    for target in (
+        bridge.work, bridge.run_schedules, bridge.keep_warm, bridge.check_phone_control,
+        bridge.guard_wireless_debugging, bridge.monitor_battery,
+    ):
+        threading.Thread(target=target, daemon=True).start()
+    bridge.poll()
+
+
+if __name__ == "__main__":
+    main()

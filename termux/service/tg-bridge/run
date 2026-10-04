@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit service: Telegram bridge for the phone agent (inside Debian as user agent, in its venv).
+# Runs straight from the git checkout, so /update (git pull + exit) restarts into the new code.
+# proot does not forward TERM to its child, so stop the bridge ourselves and never leave a stray copy.
+# The pattern is anchored so it only matches the bridge itself, not shells that mention it.
+PYTHON=/home/agent/venv/bin/python3
+BRIDGE=/home/agent/m34-agent/bridge/bridge.py
+MATCH="^$PYTHON $BRIDGE"
+pkill -f "$MATCH"
+proot-distro login debian --user agent -- $PYTHON $BRIDGE 2>&1 &
+child=$!
+trap "pkill -TERM -f \"$MATCH\"; wait $child; exit 0" TERM INT
+wait $child

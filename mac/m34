@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Reconnect the Galaxy M34 over Wi-Fi on a fixed port and open scrcpy.
+# Android resets the adb port on reboot and blocks persisting it without root,
+# so after a reboot the phone needs USB or Wireless debugging once to re-enable the fixed port.
+set -uo pipefail
+
+BIN_DIR="/Applications/ScrcpyGUI.app/Contents/MacOS/scrcpy-bin"
+ADB="$BIN_DIR/adb"
+SCRCPY="$BIN_DIR/scrcpy"
+SERIAL="${M34_SERIAL:-RZCW82LJD8A}"
+PORT="${M34_PORT:-5555}"
+TAILSCALE_IP="100.127.228.50"  # works from any network while Tailscale is on
+HOME_IP="192.168.0.112"         # fallback: the phone's fixed address on the home Wi-Fi
+TARGET=""
+POLL_SECONDS=5
+# Away from home the connection may go through a Tailscale relay (~3 Mbps): try M34_BITRATE=2M M34_MAX_SIZE=1024
+BITRATE="${M34_BITRATE:-8M}"
+MAX_SIZE="${M34_MAX_SIZE:-0}"  # 0 = full resolution
+
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+online() { [[ "$("$ADB" -s "$1" get-state 2>/dev/null)" == device ]]; }
+
+# Tailscale first; if it doesn't answer (e.g. Tailscale is off on this Mac), the home Wi-Fi address.
+# Probes Termux's SSH port because adb's port is closed for a few minutes after a phone reboot.
+pick_target() {
+    if [[ -n "${M34_IP:-}" ]]; then
+        TARGET="$M34_IP:$PORT"
+    elif nc -z -G 2 "$TAILSCALE_IP" 8022 >/dev/null 2>&1; then
+        TARGET="$TAILSCALE_IP:$PORT"
+    else
+        TARGET="$HOME_IP:$PORT"
+    fi
+}
+
+connect_fixed() {
+    online "$TARGET" && return 0
+    "$ADB" disconnect "$TARGET" >/dev/null 2>&1
+    "$ADB" connect "$TARGET" >/dev/null 2>&1
+    online "$TARGET" && return 0
+    # A stale "offline" entry can survive disconnect (seen after phone reboots); a fresh adb server clears it.
+    "$ADB" kill-server >/dev/null 2>&1
+    "$ADB" connect "$TARGET" >/dev/null 2>&1
+    online "$TARGET"
+}
+
+# A USB or Wireless debugging (mDNS) transport that can switch adbd to the fixed port.
+bootstrap_transport() {
+    if online "$SERIAL"; then
+        echo "$SERIAL"
+        return 0
+    fi
+    local addr
+    addr=$("$ADB" mdns services 2>/dev/null |
+        awk -v s="$SERIAL" '$0 ~ s && /_adb-tls-connect/ {print $NF; exit}')
+    [[ -n $addr ]] || return 1
+    "$ADB" connect "$addr" >/dev/null 2>&1
+    online "$addr" && echo "$addr"
+}
+
+ensure_connected() {
+    pick_target
+    connect_fixed && return 0
+    local via
+    via=$(bootstrap_transport) || return 1
+    log "Switching adb to port $PORT via $via"
+    "$ADB" -s "$via" tcpip "$PORT" >/dev/null 2>&1
+    sleep 3
+    connect_fixed
+}
+
+start_mirror() {
+    pgrep -f "scrcpy -s $TARGET" >/dev/null && return 0
+    log "Starting scrcpy on $TARGET"
+    ADB="$ADB" nohup "$SCRCPY" -s "$TARGET" --video-codec=h264 --video-bit-rate="$BITRATE" --max-size="$MAX_SIZE" >/dev/null 2>&1 &
+    disown
+}
+
+watch_device() {
+    local state=unknown
+    log "Watching $TARGET (Ctrl+C to stop)"
+    while true; do
+        if ensure_connected; then
+            [[ $state == online ]] || { log "Connected"; start_mirror; }
+            state=online
+        else
+            [[ $state == offline ]] || log "Phone unreachable. Plug in USB or turn on Wireless debugging."
+            state=offline
+        fi
+        sleep "$POLL_SECONDS"
+    done
+}
+
+usage() {
+    cat <<EOF
+Usage: m34 [--watch | --no-mirror]
+  (none)       connect (Tailscale $TAILSCALE_IP, else home Wi-Fi $HOME_IP) and open scrcpy
+  --no-mirror  connect only
+  --watch      keep reconnecting; reopens scrcpy whenever the phone comes back
+EOF
+}
+
+case "${1:-}" in
+    "")
+        ensure_connected || { log "Phone unreachable. Plug in USB or turn on Wireless debugging."; exit 1; }
+        start_mirror
+        ;;
+    --no-mirror)
+        ensure_connected && log "Connected to $TARGET" || { log "Phone unreachable."; exit 1; }
+        ;;
+    --watch) pick_target; watch_device ;;
+    -h | --help) usage ;;
+    *) usage; exit 2 ;;
+esac

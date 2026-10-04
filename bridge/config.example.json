@@ -1,0 +1,8 @@
+{
+  "token": "TELEGRAM_BOT_TOKEN",
+  "providers": {
+    "gemini": "GEMINI_API_KEY",
+    "gemini#2": "OPTIONAL_SECOND_GEMINI_KEY",
+    "groq": "GROQ_API_KEY"
+  }
+}

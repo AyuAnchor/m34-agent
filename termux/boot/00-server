@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Keep the CPU awake and start runit services (sshd, agents) after a reboot.
+termux-wake-lock
+. $PREFIX/etc/profile.d/start-services.sh

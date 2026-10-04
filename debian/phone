@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run adb against this phone itself (uid shell). Agents use this for device-level control.
+# Usage: phone shell input tap 500 1200 | phone exec-out screencap -p > /tmp/s.png
+TARGET=127.0.0.1:5555
+[ "$(adb -s $TARGET get-state 2>/dev/null)" = device ] || adb connect $TARGET >/dev/null 2>&1
+exec /usr/bin/adb -s $TARGET "$@"
