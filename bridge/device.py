@@ -458,7 +458,7 @@ class Device:
         # monkey stays as the fallback for packages that aren't in the launcher list.
         component = self.launchable().get(package)
         # The same intent and flags a launcher uses, so an app already open comes back where it was.
-        output = shell(f"am start -a android.intent.action.MAIN -c {LAUNCHER} -f 0x10200000 -n {component}") if component else ""
+        output = shell(f"am start -a android.intent.action.MAIN -c {LAUNCHER} -f 0x10200000 -n {shlex.quote(component)}") if component else ""
         if not component or "Error" in output:
             shell(f"monkey -p {package} -c {LAUNCHER} 1")
             time.sleep(1.5)
