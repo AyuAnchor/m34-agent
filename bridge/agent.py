@@ -411,11 +411,17 @@ class Router:
         saved = read_json(COOLDOWNS_PATH, {})
         latest = time.time() + DAILY_RECHECK_S  # older versions paused until midnight Pacific
         for model in self.models:
-            model.cooldown_until = max(model.cooldown_until, min(saved.get(model.label, 0.0), latest))
+            entry = saved.get(model.label, 0.0)
+            if isinstance(entry, dict):
+                until, model.out_of_quota = entry.get("until", 0.0), bool(entry.get("full"))
+            else:  # older versions saved only the time
+                until = entry
+            model.cooldown_until = max(model.cooldown_until, min(until, latest))
 
     def save_cooldowns(self) -> None:
         now = time.time()
-        write_atomically(COOLDOWNS_PATH, json.dumps({m.label: m.cooldown_until for m in self.models if m.cooldown_until > now}))
+        paused = {m.label: {"until": m.cooldown_until, "full": m.out_of_quota} for m in self.models if m.cooldown_until > now}
+        write_atomically(COOLDOWNS_PATH, json.dumps(paused))
 
     def complete(self, messages: list[dict[str, Any]], fast_first: bool = False) -> tuple[dict[str, Any], Model]:
         """Ask the best available model. fast_first tries the quickest models first (a task's first step:
