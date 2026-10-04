@@ -405,7 +405,11 @@ class Bridge:
                 log.exception("update failed")
                 self.notify(f"Update failed: {error}")
                 return
-            self.tg.send(self.owner, result.message)
+            log.info(result.message.splitlines()[0])
+            try:
+                self.tg.send(self.owner, result.message)
+            except Exception:  # the new code is already in place, so restart into it regardless
+                log.exception("could not send the update reply")
             if result.restart:
                 log.info("exiting to restart into the updated code")
                 os._exit(0)  # runit starts the service again, now running the new code
@@ -589,7 +593,14 @@ class Bridge:
                 log.exception("scheduler failed")
 
 
+def log_thread_error(args: threading.ExceptHookArgs) -> None:
+    """An uncaught error in a background thread otherwise goes to stderr, which runit discards."""
+    name = args.thread.name if args.thread else "?"
+    log.error(f"thread {name} crashed", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+
 def main() -> None:
+    threading.excepthook = log_thread_error
     try:
         log.info(f"starting, code version {current_version(REPO_DIR)}")
     except Exception:
