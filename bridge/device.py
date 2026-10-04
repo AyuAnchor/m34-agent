@@ -23,6 +23,10 @@ except ImportError:
 log = logging.getLogger("device")
 
 ADB_TARGET = "127.0.0.1:5555"  # same device the `phone` wrapper talks to
+# adb's own connection errors only, so a command's own failure output never causes a repeat run.
+ADB_DISCONNECTED = re.compile(r"^(?:adb: )?error: (?:device .*(?:not found|offline)|no devices|closed)", re.MULTILINE)
+# With Android animations off (see README), a short pause lets the tap register before the stability check.
+ACTION_PAUSE_S = 0.3
 SCREEN_PATH = Path("/tmp/agent-screen.jpg")
 MEDIA_DIR = Path("/tmp/agent-media")
 CAMERA_DIR = "/sdcard/DCIM/Camera"
@@ -70,7 +74,14 @@ MARK_COLOR = (255, 0, 180)
 
 
 def adb(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["phone", *args], capture_output=True, timeout=timeout)
+    """Run adb against this phone. Calls adb directly (~100 ms) and only reconnects when a command fails,
+    instead of checking the connection before every command (~90 ms extra each)."""
+    command = ["adb", "-s", ADB_TARGET, *args]
+    result = subprocess.run(command, capture_output=True, timeout=timeout)
+    if result.returncode != 0 and ADB_DISCONNECTED.search(result.stderr.decode(errors="replace")):
+        subprocess.run(["adb", "connect", ADB_TARGET], capture_output=True, timeout=30)
+        result = subprocess.run(command, capture_output=True, timeout=timeout)
+    return result
 
 
 def shell(command: str, timeout: int = 60) -> str:
@@ -329,7 +340,7 @@ class Device:
             shell(f"input swipe {px} {py} {px} {py} {int(hold_ms)}")
         else:
             shell(f"input tap {px} {py}")
-        time.sleep(1)
+        time.sleep(ACTION_PAUSE_S)
         return f"{'Long-pressed' if hold_ms else 'Tapped'} {what}."
 
     def type_text(self, text: str, submit: bool) -> str:
@@ -353,7 +364,7 @@ class Device:
         if direction not in moves:
             return "Direction must be up, down, left or right."
         shell("input swipe {} {} {} {} 400".format(*moves[direction]))
-        time.sleep(1)
+        time.sleep(ACTION_PAUSE_S)
         return f"Scrolled {direction}."
 
     def wifi_network(self) -> str | None:
@@ -420,7 +431,7 @@ class Device:
         if not code:
             return f"Unknown key. Use one of: {', '.join(KEYS)}."
         shell(f"input keyevent {code}")
-        time.sleep(0.5)
+        time.sleep(ACTION_PAUSE_S)
         return f"Pressed {name}."
 
     def launchable(self, refresh: bool = False) -> list[str]:

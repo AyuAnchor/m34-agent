@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent import Agent, Router
 from commands import QuickCommands, parse_duration, plain
@@ -135,8 +135,9 @@ class Bridge:
         self.started = 0.0
         self.actions: list[str] = []
         self.model = ""
-        self.progress_id: int | None = None
+        self.progress_id: int | None = None  # set and cleared only by the progress sender thread
         self.last_edit = 0.0
+        self.progress_jobs: queue.Queue[Callable[[], None]] = queue.Queue()
         self.device = Device()
         self.quick = QuickCommands(self.device)
         self.device_lock = threading.Lock()  # one user of the screen at a time: a task, a quick command or a watch
@@ -347,13 +348,24 @@ class Bridge:
 
         threading.Thread(target=capture, daemon=True).start()
 
+    def send_progress(self) -> None:
+        """Posts and edits the progress message in order on its own thread, so the agent never waits on
+        Telegram between actions."""
+        while True:
+            job = self.progress_jobs.get()
+            try:
+                job()
+            except Exception as error:  # unchanged text or a network blip; the next edit catches up
+                log.debug(f"progress update skipped: {error}")
+
     def post_progress(self) -> None:
         """The live progress message appears with the first action, so plain chat gets its reply sooner."""
-        try:
-            sent = self.tg.call("sendMessage", chat_id=self.owner, text=f"Working: {self.task[:200]}")
-            self.progress_id = sent["message_id"]
-        except Exception:
-            log.exception("could not post progress message")
+        text = f"Working: {self.task[:200]}"
+
+        def post() -> None:
+            self.progress_id = self.tg.call("sendMessage", chat_id=self.owner, text=text)["message_id"]
+
+        self.progress_jobs.put(post)
 
     def on_action(self, model: str, action: str) -> None:
         self.model = model
@@ -364,7 +376,7 @@ class Bridge:
             self.update_progress("Working")
 
     def update_progress(self, headline: str) -> None:
-        if self.progress_id is None:
+        if not self.actions:  # plain chat: no progress message was posted
             return
         steps = self.actions[-PROGRESS_LINES:]
         first = len(self.actions) - len(steps) + 1
@@ -373,11 +385,13 @@ class Bridge:
             f"{headline}: {self.task[:200]}\n"
             f"{self.elapsed()} · {len(self.actions)} steps · {self.model or 'starting'}\n\n{lines}"
         )
-        try:
-            self.tg.call("editMessageText", chat_id=self.owner, message_id=self.progress_id, text=text.strip())
-            self.last_edit = time.time()
-        except Exception as error:  # unchanged text or a network blip; the next edit catches up
-            log.debug(f"progress edit skipped: {error}")
+        self.last_edit = time.time()
+
+        def edit() -> None:
+            if self.progress_id is not None:
+                self.tg.call("editMessageText", chat_id=self.owner, message_id=self.progress_id, text=text.strip())
+
+        self.progress_jobs.put(edit)
 
     def update(self) -> None:
         def run() -> None:
@@ -472,7 +486,7 @@ class Bridge:
                 self.notify(f"Task failed: {error}")
             finally:
                 self.update_progress("Stopped" if self.cancel.is_set() else "Finished")
-                self.progress_id = None
+                self.progress_jobs.put(lambda: setattr(self, "progress_id", None))  # after the final edit
                 self.busy = False
 
     def usage_report(self) -> str:
@@ -573,7 +587,7 @@ def main() -> None:
         log.warning(f"could not register the command menu: {error}")
     for target in (
         bridge.work, bridge.run_schedules, bridge.keep_warm, bridge.check_phone_control,
-        bridge.guard_wireless_debugging, bridge.monitor_battery,
+        bridge.guard_wireless_debugging, bridge.monitor_battery, bridge.send_progress,
     ):
         threading.Thread(target=target, daemon=True).start()
     bridge.poll()

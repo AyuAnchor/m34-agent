@@ -314,6 +314,9 @@ Settings → About phone → tap **Build number** 7 times. Then in Developer opt
 ```sh
 adb shell settings put global stay_on_while_plugged_in 7     # screen stays awake while charging
 adb shell settings put global ota_disable_automatic_update 1  # no surprise OS updates
+adb shell settings put global window_animation_scale 0       # no animations: screens settle faster
+adb shell settings put global transition_animation_scale 0
+adb shell settings put global animator_duration_scale 0
 ```
 
 Also turn on **Battery protection** (stop charging at 80%) in Settings → Battery.

@@ -39,7 +39,6 @@ SCREEN_TOOLS = {
 }
 DEVICE_WAIT_S = 60  # a watch clip or quick command finishes well within this
 SHOWS_SCREEN_AFTER = {"tap", "type_text", "scroll", "key", "open_app", "open_url"}
-SETTLE_S = 0.3  # let animations finish before reading the new screen
 SCREEN_MARKER = "Elements on screen"
 ELEMENT_LINE = re.compile(r"^\[\d+\] (.*?)(?: #\S+)?(?: (?:checked|selected|focused)\b.*)?$")
 MAX_OLD_SCREEN = 1500
@@ -774,7 +773,6 @@ class Agent:
             return result
         result = str(result)[-MAX_TOOL_OUTPUT:]
         if name in SHOWS_SCREEN_AFTER:  # saves the AI a separate look round trip (~1-3 s each)
-            time.sleep(SETTLE_S)
             screen, image = self.device.look(with_image=model.vision)
             return f"{result}\n\n{screen}", image
         return result, None
