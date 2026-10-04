@@ -223,9 +223,10 @@ silently. Tune `MOTION_PIXEL_DIFF` / `MOTION_SHARE` in `device.py` if you get fa
 
 Every agent step is one request, so the two smartest Gemini models cover only a few phone tasks a
 day; Flash Lite does most of the work. Gemini limits are per Google Cloud project and reset at
-midnight Pacific time; a model that runs out is parked until exactly then. Check yours at
-aistudio.google.com/rate-limit (Groq reports its limits in response headers). Free tiers change,
-so treat these numbers as a snapshot.
+midnight Pacific time, though quota has come back sooner in practice, so a model that runs out
+is tried again every hour. Groq's daily limit is a rolling 24-hour window that it reports in
+response headers, and `/usage` shows those numbers as Groq gives them. Check Gemini's at
+aistudio.google.com/rate-limit. Free tiers change, so treat these numbers as a snapshot.
 
 ### Shortcuts
 
@@ -481,7 +482,7 @@ Photos take ~14 s (the camera app needs ~9 s to process a photo) and audio adds 
 | `/memory`, `/forget N` | see memory notes, delete note N |
 | `/schedules`, `/unschedule N` | see scheduled tasks, cancel task N |
 | `/shortcuts`, `/delshortcut N` | see saved shortcuts, delete shortcut N |
-| `/usage` | AI requests today per model vs the free daily limits, and which models are paused |
+| `/usage` | Table of AI requests per model against the free daily limits (Groq's own numbers), and which models are paused |
 | `/watch 10m [front\|back]`, `/unwatch` | message me with a clip if anything moves; stop watching |
 | `/stop` | stop the task and clear the queue |
 | `/new` | forget the conversation (memory notes stay) |

@@ -24,6 +24,9 @@ ENDPOINTS = {  # provider -> (host, path) of its OpenAI-compatible chat endpoint
     "groq": ("api.groq.com", "/openai/v1/chat/completions"),
 }
 COOLDOWNS_PATH = STATE_DIR / "cooldowns.json"
+# Quotas used up "per day" free up sooner than the documented reset (Groq's window rolls, and Gemini has
+# answered hours before midnight Pacific), so a full model is tried again after this long.
+DAILY_RECHECK_S = 3600
 PACIFIC = ZoneInfo("America/Los_Angeles")
 WORKSPACE_DIR = "/home/agent/agent"
 MAX_STEPS = 40
@@ -314,14 +317,19 @@ def as_bool(value: Any) -> bool:
     return value is True or str(value).lower() in ("true", "1", "yes")
 
 
-def seconds_until_quota_reset(provider: str) -> float:
-    """Gemini's daily quotas reset at midnight Pacific time; wait exactly until then (plus a minute)
-    instead of a flat guess. Other providers: 6 hours."""
-    if provider != "gemini":
-        return 6 * 3600
+def seconds_until_quota_reset() -> float:
+    """Gemini's daily quotas reset at midnight Pacific time (plus a minute of margin)."""
     now = datetime.now(PACIFIC)
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return midnight.timestamp() - now.timestamp() + 60  # timestamps, so a DST change in between counts
+
+
+def reported_quota(headers: Any) -> tuple[int, int] | None:
+    """(daily limit, left) from Groq's headers, which count its rolling 24-hour window."""
+    try:
+        return int(headers["x-ratelimit-limit-requests"]), int(headers["x-ratelimit-remaining-requests"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def retry_after(headers: Any, detail: str) -> float | None:
@@ -348,6 +356,8 @@ class Model:
     daily: int = 0  # free-tier requests per day (for /usage; the provider enforces it)
     cooldown_until: float = 0.0
     strikes: int = 0
+    out_of_quota: bool = False  # the last refusal was for the daily quota
+    reported: tuple[int, int] | None = None  # (daily limit, left) as the provider last reported them
 
     @property
     def label(self) -> str:
@@ -399,8 +409,9 @@ class Router:
     def load_cooldowns(self) -> None:
         """Restarts shouldn't forget which models are out of quota; retrying them costs seconds."""
         saved = read_json(COOLDOWNS_PATH, {})
+        latest = time.time() + DAILY_RECHECK_S  # older versions paused until midnight Pacific
         for model in self.models:
-            model.cooldown_until = max(model.cooldown_until, saved.get(model.label, 0.0))
+            model.cooldown_until = max(model.cooldown_until, min(saved.get(model.label, 0.0), latest))
 
     def save_cooldowns(self) -> None:
         now = time.time()
@@ -438,6 +449,7 @@ class Router:
 
     def succeeded(self, model: Model, message: dict[str, Any], after_failure: bool) -> tuple[dict[str, Any], Model]:
         model.strikes = 0
+        model.out_of_quota = False
         if after_failure and self.active not in (None, model):  # only switches forced by a problem are news
             self.notify(f"Switched to {model.label} ({self.last_failure}).")
         self.active = model
@@ -456,6 +468,7 @@ class Router:
         start = time.time()
         status, response_headers, data = self.pools[model.family].request(path, json.dumps(body).encode(), headers, 120)
         log.info(f"{model.label}: HTTP {status} in {time.time() - start:.1f}s")
+        model.reported = reported_quota(response_headers) or model.reported
         if self.usage and status in (200, 429):
             self.usage.record(model.label, ok=status == 200)
         if status != 200:
@@ -469,7 +482,10 @@ class Router:
         if code == 429:
             model.strikes += 1
             if "perday" in detail.lower().replace(" ", ""):
-                wait = seconds_until_quota_reset(model.family)
+                model.out_of_quota = True
+                if match := re.search(r'"quotaValue":\s*"(\d+)"', detail):
+                    model.daily = int(match[1])
+                wait = min(seconds_until_quota_reset(), DAILY_RECHECK_S)
                 self.last_failure = f"{model.label} used up its daily quota"
             else:
                 wait = hint + 2 if hint else min(60 * 2 ** (model.strikes - 1), 3600)

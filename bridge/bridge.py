@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Telegram bridge: the owner's messages become tasks for the phone agent."""
+import html
 import json
 import logging
 import logging.handlers
@@ -279,7 +280,7 @@ class Bridge:
         elif text == "/schedules":
             self.tg.send(self.owner, self.schedules.listing() or "No scheduled tasks.")
         elif text == "/usage":
-            self.tg.send(self.owner, self.usage_report())
+            self.tg.send(self.owner, self.usage_report(), parse_mode="HTML")
         elif text == "/shortcuts":
             self.tg.send(self.owner, self.shortcuts.listing() or "No shortcuts saved yet.")
         elif text.split()[0] in ("/forget", "/unschedule", "/delshortcut"):
@@ -490,21 +491,37 @@ class Bridge:
                 self.busy = False
 
     def usage_report(self) -> str:
+        """A monospace table: requests used against each model's daily limit, and whether it can be used now."""
         now = time.time()
+        tz = self.schedules.tz
         reset = (datetime.now(PACIFIC) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        local_reset = reset.astimezone(self.schedules.tz).strftime("%H:%M")
         counts = self.usage.today()
-        lines = [f"AI requests today (counted by the bot; daily quotas reset at {local_reset} your time):"]
-        for model in self.agent.router.models:
-            used, limited = counts.get(model.label, [0, 0])
-            line = f"{model.label}: {used}/{model.daily}"
-            if limited:
-                line += f", {limited} refused for limits"
-            if model.cooldown_until > now:
-                until = datetime.fromtimestamp(model.cooldown_until, self.schedules.tz).strftime("%H:%M")
-                line += f" (paused until {until})"
-            lines.append(line)
-        return "\n".join(lines)
+        models = self.agent.router.models
+        several_keys = {model.family for model in models if "#" in model.provider}
+        rows = [("Model", "Used", "Now")]
+        for model in models:
+            name = model.name.split("/")[-1].removeprefix("gemini-").removesuffix("-latest").removesuffix("-preview")
+            if model.family in several_keys:
+                name += f" #{model.provider.partition('#')[2] or 1}"
+            if model.reported:
+                limit, left = model.reported
+                used = f"{limit - left}/{limit}"
+            else:
+                used = f"{counts.get(model.label, [0, 0])[0]}/{model.daily}"
+            if model.cooldown_until <= now:
+                state = "ready"
+            else:
+                until = datetime.fromtimestamp(model.cooldown_until, tz).strftime("%H:%M")
+                state = f"full, {until}" if model.out_of_quota else f"wait {until}"
+            rows.append((name, used, state))
+        widths = [max(len(row[column]) for row in rows) for column in range(2)]
+        table = "\n".join(f"{name:<{widths[0]}}  {used:>{widths[1]}}  {state}" for name, used, state in rows)
+        notes = [
+            f"Gemini: counted by this bot since its daily reset at {reset.astimezone(tz):%H:%M}.",
+            "Groq: as Groq reports it, over the last 24 hours.",
+            "full = daily quota used up; the time is when it is tried again.",
+        ]
+        return f"<b>AI usage</b>\n<pre>{html.escape(table)}</pre>\n" + "\n".join(notes)
 
     def monitor_battery(self) -> None:
         """Message the owner once when the battery drops below BATTERY_LOW, and when it has recovered."""
