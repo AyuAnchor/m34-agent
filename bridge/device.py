@@ -24,7 +24,9 @@ log = logging.getLogger("device")
 
 ADB_TARGET = "127.0.0.1:5555"  # same device the `phone` wrapper talks to
 # adb's own connection errors only, so a command's own failure output never causes a repeat run.
-ADB_DISCONNECTED = re.compile(r"^(?:adb: )?error: (?:device .*(?:not found|offline)|no devices|closed)", re.MULTILINE)
+ADB_DISCONNECTED = re.compile(
+    r"^(?:adb: )?(?:error: )?(?:device\b.*\b(?:not found|offline)|no devices|closed)", re.MULTILINE
+)
 # With Android animations off (see README), a short pause lets the tap register before the stability check.
 ACTION_PAUSE_S = 0.3
 SCREEN_PATH = Path("/tmp/agent-screen.jpg")
