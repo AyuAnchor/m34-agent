@@ -44,6 +44,19 @@ TERMUX_BIN = "/data/data/com.termux/files/usr/bin"
 MIC_RECORDER = f"{TERMUX_BIN}/termux-microphone-record"
 AUDIO_DIR = Path("/data/data/com.termux/files/home/.agent-audio")
 VOLUME_STREAMS = {"media": 3, "ring": 2, "alarm": 4, "notification": 5}
+DUMPSYS_STREAMS = {"media": "MUSIC", "ring": "RING", "alarm": "ALARM", "notification": "NOTIFICATION"}
+STATUS_SCRIPT = (
+    "dumpsys audio | grep -E '^- STREAM_(MUSIC|RING|ALARM|NOTIFICATION):|^   (Max|streamVolume):';"
+    "echo ringer=$(dumpsys audio | grep -m1 'mode (external)' | sed 's/.*= //');"
+    "echo brightness=$(settings get system screen_brightness);"
+    "echo auto_brightness=$(settings get system screen_brightness_mode);"
+    "echo timeout=$(settings get system screen_off_timeout);"
+    "echo airplane=$(settings get global airplane_mode_on);"
+    "echo bluetooth=$(settings get global bluetooth_on);"
+    "echo zen=$(settings get global zen_mode);"
+    "cmd wifi status | grep -m1 'connected to';"
+    "dumpsys battery | grep -E '^  (level|status):'"
+)
 LARGE_VIDEO_BYTES = 20 * 1024 * 1024  # compress videos above this before sending
 MOTION_FPS = 2
 MOTION_SIZE = (160, 90)
@@ -569,6 +582,37 @@ class Device:
         start_activity("android.intent.action.VIEW", data=url)
         time.sleep(2)
         return f"Opened {url}."
+
+    def status(self) -> str:
+        """Volumes, brightness, connectivity and battery in one adb call (~0.7 s), so the AI doesn't dig
+        through dumpsys output over many steps."""
+        output = shell(STATUS_SCRIPT)
+        values = dict(re.findall(r"^(\w+)=(.*)$", output, re.MULTILINE))
+        volumes = []
+        for name, stream in DUMPSYS_STREAMS.items():
+            block = re.search(rf"^- STREAM_{stream}:\n((?:   .*\n?)*)", output, re.MULTILINE)
+            level = re.search(r"streamVolume:(\d+)", block[1]) if block else None
+            top = re.search(r"Max: (\d+)", block[1]) if block else None
+            if level and top:
+                volumes.append(f"{name} {round(100 * int(level[1]) / int(top[1]))}%")
+        brightness, timeout = values.get("brightness", ""), values.get("timeout", "")
+        wifi = re.search(r'connected to "([^"]*)"', output)
+        level = re.search(r"^  level: (\d+)", output, re.MULTILINE)
+        charging = re.search(r"^  status: ([25])$", output, re.MULTILINE)
+
+        def on(key: str) -> str:
+            return "on" if values.get(key) == "1" else "off"
+
+        return "\n".join([
+            f"Volume: {', '.join(volumes) or 'unknown'}; ringer {values.get('ringer', '?').lower()}",
+            f"Brightness: {round(100 * int(brightness) / 255) if brightness.isdigit() else '?'}%"
+            f"{' (auto)' if values.get('auto_brightness') == '1' else ''}",
+            f"Screen timeout: {int(timeout) // 1000 if timeout.isdigit() else '?'} s",
+            f"Wi-Fi: {wifi[1] if wifi else 'not connected'}",
+            f"Airplane mode: {on('airplane')}; Bluetooth: {on('bluetooth')}; "
+            f"Do not disturb: {'off' if values.get('zen') in ('0', None) else 'on'}",
+            f"Battery: {f'{level[1]}%, ' + ('charging' if charging else 'not charging') if level else 'unknown'}",
+        ])
 
     def set_volume(self, percent: int, stream: str) -> str:
         stream_id = VOLUME_STREAMS.get(stream)

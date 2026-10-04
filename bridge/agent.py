@@ -50,7 +50,7 @@ SCHEDULED_PREFIX = re.compile(r"^\[Scheduled #\d+\]\s*")
 TAPPED = re.compile(r"^(?:Tapped|Long-pressed) \[\d+\] (.+?)\.$", re.MULTILINE)
 # Never saved into shortcuts: read-only, and anything sensitive or personal.
 SHORTCUT_SKIP = {
-    "look", "list_schedules", "remember", "forget", "schedule_task", "cancel_schedule",
+    "look", "phone_status", "list_schedules", "remember", "forget", "schedule_task", "cancel_schedule",
     "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "stop_watch", "ask_owner",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs usually wandered; not worth replaying
@@ -80,22 +80,17 @@ messages you on Telegram. The touchscreen is broken, so you act only through you
 
 Using the phone:
 - If the message is just conversation (a greeting, or a question you can answer), reply directly \
-without using tools.
+without using tools. Never guess the phone's state (settings, screen, files): check it with a tool.
 - Call look before your first action. After tap, type_text, scroll, key, open_app and open_url you \
 automatically get the new screen, so don't call look again after them. Tap by element number from \
 the latest screen; numbers change after every action.
 - Only when the target has no number, tap with x and y on a 0-1000 scale of the screenshot \
 (0,0 is top-left, 1000,1000 is bottom-right).
 - If the screen is off or black, press the wakeup key.
-- Prefer the high-level tools: open_app, type_text, scroll, key, wait. For the camera use take_photo \
-or record_video (they drive the camera app for you); for sound only, use record_audio. Then send_file \
-to deliver the result.
-- For alarms, timers, links, volume, brightness, speaking aloud, contacts, calls, SMS and email, use \
-the direct tools instead of tapping through apps. To tap something with visible text, tap with text.
-- For anything from the internet (weather, news, prices, facts, a link the owner sent), use \
-web_search and fetch_url: they answer in about a second without touching the screen. Use the phone's \
-browser only when the owner wants it shown on the phone or a site needs tapping.
-- To be told when something moves ("tell me if there's motion", "watch the room"), use watch_motion.
+- Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
+settings status, calls, messages, motion watch). send_file delivers files to the owner.
+- For anything from the internet, use web_search and fetch_url (about a second, no screen). Use the \
+phone's browser only when the owner wants it shown on the phone or a site needs tapping.
 - Do exactly what the owner asked. If no tool can do it, say so and ask; never substitute something \
 else (for example, never record video when asked for audio).
 - If an action doesn't change the screen, don't repeat it. Try another way (scroll, back, another \
@@ -103,10 +98,9 @@ element) or tell the owner what is blocking you.
 - When done, reply in a few short sentences: what you did and the result.
 
 Memory and schedules:
-- Use remember for lasting facts or preferences the owner tells you, and for tricks you learn that \
-work on this phone. Keep notes short. Never save passwords or secrets.
-- For requests like "every morning", "remind me at 6" or "in 2 hours", use schedule_task. \
-Scheduled tasks come back later as messages starting with [Scheduled].
+- remember lasting facts, preferences and tricks that work on this phone; never passwords or secrets.
+- "Every morning", "remind me at 6", "in 2 hours": use schedule_task. Those tasks come back as \
+messages starting with [Scheduled].
 
 Rules:
 - Never change Wi-Fi, wireless or USB debugging, developer options, Termux or Shizuku, and never \
@@ -126,176 +120,174 @@ What you remember:
 Now: {now} ({timezone})."""
 
 
-def prop(kind: str, description: str, **extra: Any) -> dict[str, Any]:
-    return {"type": kind, "description": description, **extra}
+def prop(kind: str, description: str = "", **extra: Any) -> dict[str, Any]:
+    return {"type": kind, **({"description": description} if description else {}), **extra}
 
 
 def function(name: str, description: str, params: dict[str, Any] | None = None, required: tuple[str, ...] = ()) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {"type": "object", "properties": params or {}, "required": list(required)},
-        },
-    }
+    """Every tool is sent with every request, so empty fields are left out to save tokens."""
+    parameters: dict[str, Any] = {"type": "object", "properties": params or {}}
+    if required:
+        parameters["required"] = list(required)
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
 
 
 TOOLS = [
-    function("look", "See the screen: numbered elements, plus a screenshot with the numbers drawn on if you can see images."),
+    function("look", "See the screen: numbered elements (and a marked screenshot if you see images)."),
     function(
         "tap",
-        "Tap an element by its visible text, by number from the latest look, or a point on the 0-1000 scale. "
-        "Set hold_ms for a long press.",
+        "Tap by visible text, element number, or x/y (0-1000). hold_ms long-presses.",
         {
-            "text": prop("string", "visible text or label of the element, e.g. 'Start recording'"),
-            "element": prop("integer", "element number from look"),
-            "x": prop("number", "0-1000, left to right"),
-            "y": prop("number", "0-1000, top to bottom"),
-            "hold_ms": prop("integer", "long-press duration in ms"),
+            "text": prop("string"),
+            "element": prop("integer"),
+            "x": prop("number"),
+            "y": prop("number"),
+            "hold_ms": prop("integer"),
         },
     ),
     function(
         "type_text",
         "Type into the focused field.",
-        {"text": prop("string", "ASCII text"), "submit": prop("boolean", "press Enter after typing")},
+        {"text": prop("string", "ASCII"), "submit": prop("boolean", "press Enter after")},
         ("text",),
     ),
     function(
         "scroll",
-        "Scroll to reveal more content. 'down' swipes the finger up: shows content further down, and on the "
-        "home screen opens the app drawer. 'up' swipes the finger down: shows content above, and at the top of "
-        "the screen pulls down notifications.",
-        {"direction": prop("string", "", enum=["up", "down", "left", "right"])},
+        "Scroll. 'down' shows content further down (on the home screen: the app drawer); 'up' shows content "
+        "above (at the top: the notification shade).",
+        {"direction": prop("string", enum=["up", "down", "left", "right"])},
         ("direction",),
     ),
     function(
         "key",
         "Press a key.",
-        {"name": prop("string", "", enum=["back", "home", "enter", "recents", "wakeup", "delete", "tab", "volume_up", "volume_down"])},
+        {"name": prop("string", enum=["back", "home", "enter", "recents", "wakeup", "delete", "tab", "volume_up", "volume_down"])},
         ("name",),
     ),
-    function("open_app", "Open an app by name, e.g. chrome, camera, whatsapp, settings.", {"name": prop("string", "app name")}, ("name",)),
-    function("wait", "Wait a few seconds, e.g. for something to load.", {"seconds": prop("integer", f"1-{MAX_WAIT_S}")}, ("seconds",)),
-    function("take_photo", "Take a photo with the camera app. Returns the file path.", {"front": prop("boolean", "use the front camera")}),
+    function("open_app", "Open an app by name.", {"name": prop("string")}, ("name",)),
+    function("wait", "Wait for something to load.", {"seconds": prop("integer", f"1-{MAX_WAIT_S}")}, ("seconds",)),
+    function("take_photo", "Take a photo; returns its path.", {"front": prop("boolean")}),
     function(
         "record_video",
-        "Record a video with the camera app. Returns the file path.",
-        {"seconds": prop("integer", "1-30"), "front": prop("boolean", "use the front camera")},
+        "Record a video; returns its path.",
+        {"seconds": prop("integer", "1-30"), "front": prop("boolean")},
         ("seconds",),
     ),
     function(
         "record_audio",
-        "Record sound from the microphone only (no camera, no video). Returns the file path.",
+        "Record sound only (no video); returns its path.",
         {"seconds": prop("integer", f"1-{MAX_AUDIO_S}")},
         ("seconds",),
     ),
     function(
         "set_alarm",
-        "Set an alarm in the clock app.",
-        {"hour": prop("integer", "0-23"), "minute": prop("integer", "0-59"), "label": prop("string", "alarm name")},
+        "Set an alarm.",
+        {"hour": prop("integer", "0-23"), "minute": prop("integer"), "label": prop("string")},
         ("hour", "minute"),
     ),
     function(
         "set_timer",
-        "Start a countdown timer in the clock app.",
-        {"seconds": prop("integer", "timer length"), "label": prop("string", "timer name")},
+        "Start a timer.",
+        {"seconds": prop("integer"), "label": prop("string")},
         ("seconds",),
     ),
-    function("open_url", "Open a web link in the browser.", {"url": prop("string", "http(s) link")}, ("url",)),
+    function("open_url", "Open a link in the browser.", {"url": prop("string")}, ("url",)),
     function(
         "set_volume",
         "Set a volume level.",
-        {"percent": prop("integer", "0-100"), "stream": prop("string", "", enum=["media", "ring", "alarm", "notification"])},
+        {"percent": prop("integer", "0-100"), "stream": prop("string", enum=["media", "ring", "alarm", "notification"])},
         ("percent",),
     ),
+    function(
+        "phone_status",
+        "Read volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb and battery.",
+    ),
     function("set_brightness", "Set screen brightness.", {"percent": prop("integer", "0-100")}, ("percent",)),
-    function("speak", "Say something out loud through the phone's speaker.", {"text": prop("string", "what to say")}, ("text",)),
-    function("search_contacts", "Find contacts by name or number.", {"query": prop("string", "name or number")}, ("query",)),
+    function("speak", "Say something out loud on the phone.", {"text": prop("string")}, ("text",)),
+    function("search_contacts", "Find contacts by name or number.", {"query": prop("string")}, ("query",)),
     function(
         "make_call",
-        "Call a phone number. The owner is asked to approve.",
-        {"number": prop("string", "phone number")},
+        "Call a number (owner approves).",
+        {"number": prop("string")},
         ("number",),
     ),
     function(
         "send_sms",
-        "Send an SMS. The owner is asked to approve.",
-        {"number": prop("string", "phone number"), "text": prop("string", "message")},
+        "Send an SMS (owner approves).",
+        {"number": prop("string"), "text": prop("string")},
         ("number", "text"),
     ),
     function(
         "send_email",
-        "Write an email in the mail app; then tap Send. The owner is asked to approve first.",
-        {"to": prop("string", "address"), "subject": prop("string", "subject"), "body": prop("string", "message")},
+        "Write an email in the mail app, then tap Send (owner approves first).",
+        {"to": prop("string"), "subject": prop("string"), "body": prop("string")},
         ("to", "subject", "body"),
     ),
     function(
         "watch_motion",
-        "Watch for movement with the camera and message the owner with a clip when something moves. Runs in "
-        "the background (it starts once this task is done), so reply right after starting it.",
-        {"seconds": prop("integer", "how long to watch, up to 7200"), "front": prop("boolean", "use the front camera")},
+        "Watch for movement with the camera; the owner gets a clip when something moves. Starts in the "
+        "background after this task, so reply right away.",
+        {"seconds": prop("integer", "up to 7200"), "front": prop("boolean")},
         ("seconds",),
     ),
     function("stop_watch", "Stop a running motion watch."),
     function(
         "web_search",
-        "Search the web (DuckDuckGo). Returns titles, links and snippets. Much faster than using the browser.",
-        {"query": prop("string", "search words")},
+        "Search the web: titles, links, snippets.",
+        {"query": prop("string")},
         ("query",),
     ),
     function(
         "fetch_url",
-        "Read the text of a public web page or link. Weather: 'wttr.in/<city>?format=3'.",
-        {"url": prop("string", "link, e.g. en.wikipedia.org/wiki/Delhi")},
+        "Read a web page's text. Weather: 'wttr.in/<city>?format=3'.",
+        {"url": prop("string")},
         ("url",),
     ),
     function(
         "ask_owner",
-        "Ask the owner a yes/no question with Approve/Deny buttons and wait for the answer (e.g. before signing in "
-        "to an app). Returns whether they approved.",
-        {"question": prop("string", "short question, e.g. 'Sign in to Manus with the phone's Google account?'")},
+        "Ask the owner a yes/no question (Approve/Deny buttons) and wait for the answer.",
+        {"question": prop("string")},
         ("question",),
     ),
     function(
         "find_media",
-        "List the newest photos or videos on the phone (camera and screenshots).",
-        {"kind": prop("string", "", enum=["photo", "video", "any"]), "count": prop("integer", "how many, up to 20")},
+        "List the newest photos or videos on the phone.",
+        {"kind": prop("string", enum=["photo", "video", "any"]), "count": prop("integer", "up to 20")},
     ),
     function(
         "send_file",
-        "Send a file (photo, video, document) to the owner on Telegram.",
-        {"path": prop("string", "path on the phone, e.g. /sdcard/DCIM/Camera/x.mp4"), "caption": prop("string", "short caption")},
+        "Send a file from the phone to the owner on Telegram.",
+        {"path": prop("string"), "caption": prop("string")},
         ("path",),
     ),
-    function("send_screenshot", "Send the current screen to the owner.", {"caption": prop("string", "short caption")}),
+    function("send_screenshot", "Send the current screen to the owner.", {"caption": prop("string")}),
     function(
         "phone",
-        "Run a raw adb command on this phone. Taps, typing, keys, app launches and read-only lookups run at once; "
-        "anything else asks the owner first. Prefer the dedicated tools.",
-        {"args": prop("string", "adb arguments, e.g. 'shell dumpsys battery'")},
+        "Run a raw adb command, e.g. 'shell dumpsys battery'. Read-only lookups run at once; anything else asks "
+        "the owner. Last resort.",
+        {"args": prop("string")},
         ("args",),
     ),
     function(
         "shell",
-        "Run a bash command in your Linux environment (internet, python3, curl). Always asks the owner first.",
-        {"command": prop("string", "bash command")},
+        "Run bash in your Linux environment (python3, curl). Owner approves.",
+        {"command": prop("string")},
         ("command",),
     ),
-    function("remember", "Save a short note to long-term memory.", {"text": prop("string", "the note")}, ("text",)),
-    function("forget", "Delete a memory note by its number.", {"id": prop("integer", "note number")}, ("id",)),
+    function("remember", "Save a short note to long-term memory.", {"text": prop("string")}, ("text",)),
+    function("forget", "Delete a memory note by number.", {"id": prop("integer")}, ("id",)),
     function(
         "schedule_task",
-        "Schedule a task to run later. The owner is asked to approve it.",
+        "Schedule a task for later (owner approves).",
         {
-            "task": prop("string", "what to do, written as an instruction to yourself"),
-            "when": prop("string", "'HH:MM', 'YYYY-MM-DD HH:MM' or 'in N minutes/hours/days' (owner's time zone)"),
+            "task": prop("string", "an instruction to yourself"),
+            "when": prop("string", "'HH:MM', 'YYYY-MM-DD HH:MM' or 'in N minutes/hours/days'"),
             "repeat": prop("string", "once, hourly, daily, weekly or 'every N minutes'"),
         },
         ("task", "when"),
     ),
     function("list_schedules", "List scheduled tasks."),
-    function("cancel_schedule", "Cancel a scheduled task by its number.", {"id": prop("integer", "schedule number")}, ("id",)),
+    function("cancel_schedule", "Cancel a scheduled task by number.", {"id": prop("integer")}, ("id",)),
 ]
 
 
@@ -636,6 +628,7 @@ class Agent:
                 as_int(a.get("percent")) or 0, str(a.get("stream") or "media")
             ),
             "set_brightness": lambda a, m: self.device.set_brightness(as_int(a.get("percent")) or 0),
+            "phone_status": lambda a, m: self.device.status(),
             "speak": lambda a, m: self.device.speak(str(a.get("text", ""))),
             "search_contacts": lambda a, m: self.device.search_contacts(str(a.get("query", ""))),
             "make_call": lambda a, m: phone_line_problem() or self.approved(

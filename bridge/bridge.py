@@ -180,6 +180,14 @@ class Bridge:
 
         threading.Thread(target=send, daemon=True).start()
 
+    def warm_screen_reader(self) -> None:
+        """The first screen read starts the phone-side uiautomator2 server (~2 s). Pay that at startup
+        instead of in the owner's first task."""
+        try:
+            self.device.read_elements()
+        except Exception as error:  # adb may not be back yet after a reboot; the first task will retry
+            log.warning(f"screen reader warm-up failed: {error}")
+
     def keep_warm(self) -> None:
         while True:
             for pool in (self.tg.pool, *self.agent.router.pools.values()):
@@ -615,7 +623,7 @@ def main() -> None:
         log.warning(f"could not register the command menu: {error}")
     for target in (
         bridge.work, bridge.run_schedules, bridge.keep_warm, bridge.check_phone_control,
-        bridge.guard_wireless_debugging, bridge.monitor_battery, bridge.send_progress,
+        bridge.guard_wireless_debugging, bridge.monitor_battery, bridge.send_progress, bridge.warm_screen_reader,
     ):
         threading.Thread(target=target, daemon=True).start()
     bridge.poll()
