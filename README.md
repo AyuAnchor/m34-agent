@@ -92,7 +92,7 @@ taps on a 0-1000 scale, which is how Gemini models naturally describe positions.
 
 After `tap`, `type_text`, `scroll`, `key`, `open_app` and `open_url` the new screen comes back
 automatically, so the AI doesn't spend a separate round trip on `look` (about half the AI calls).
-The screen is read only once it's stable (two identical reads 0.3 s apart), so a page that's still
+The screen is read only once it's stable (two identical reads in a row, ~250 ms each), so a page that's still
 animating isn't mistaken for "my tap did nothing".
 
 Older screen lists are compacted to just their text ("earlier screen showed: Android version; 16"):

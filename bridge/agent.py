@@ -78,8 +78,6 @@ LOCKOUT = re.compile(
 SYSTEM_PROMPT = """You control an Android phone ({model}, screen {width}x{height}) for its owner, who \
 messages you on Telegram. The touchscreen is broken, so you act only through your tools.
 
-Now: {now} ({timezone}).
-
 Using the phone:
 - If the message is just conversation (a greeting, or a question you can answer), reply directly \
 without using tools.
@@ -123,7 +121,9 @@ enter it themselves (they can see the screen with scrcpy). Never use banking, pa
 - If the owner denies an action, don't look for a workaround; explain what you needed and stop.
 
 What you remember:
-{memory}"""
+{memory}
+
+Now: {now} ({timezone})."""
 
 
 def prop(kind: str, description: str, **extra: Any) -> dict[str, Any]:

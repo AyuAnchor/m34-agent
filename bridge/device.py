@@ -35,7 +35,6 @@ CAMERA_DIR = "/sdcard/DCIM/Camera"
 SCREENSHOT_DIR = "/sdcard/DCIM/Screenshots"
 MAX_ELEMENTS = 80
 WIRELESS_DEBUG_PROMPT = "Allow wireless debugging on this network?"
-STABLE_POLL_S = 0.3
 STABLE_TIMEOUT_S = 2.5
 MAX_VIDEO_S = 30
 MAX_AUDIO_S = 120
@@ -202,7 +201,7 @@ class Device:
     def __init__(self) -> None:
         self.elements: list[Element] = []
         self.automator = None
-        self.apps: list[str] = []
+        self.apps: dict[str, str] = {}  # package -> its launcher component
         match = re.search(r"(\d+)x(\d+)", shell("wm size"))
         self.width, self.height = (int(match[1]), int(match[2])) if match else (1080, 2340)
 
@@ -267,8 +266,7 @@ class Device:
         """Read the screen until two reads in a row match, so a page transition isn't caught halfway."""
         elements = self.read_elements()
         deadline = time.time() + STABLE_TIMEOUT_S
-        while time.time() < deadline:
-            time.sleep(STABLE_POLL_S)
+        while time.time() < deadline:  # a read takes ~250 ms, which is gap enough between the two
             again = self.read_elements()
             if again == elements:
                 break
@@ -436,11 +434,13 @@ class Device:
         time.sleep(ACTION_PAUSE_S)
         return f"Pressed {name}."
 
-    def launchable(self, refresh: bool = False) -> list[str]:
-        """Packages with a home-screen icon, cached (refreshed when a lookup misses, e.g. after an install)."""
+    def launchable(self, refresh: bool = False) -> dict[str, str]:
+        """Packages with a home-screen icon and their launcher component, shortest name first; cached
+        (refreshed when a lookup misses, e.g. after an install)."""
         if refresh or not self.apps:
             output = shell(f"cmd package query-activities --brief -a android.intent.action.MAIN -c {LAUNCHER}")
-            self.apps = sorted({line.strip().split("/")[0] for line in output.splitlines() if "/" in line}, key=len)
+            components = {line.strip().split("/")[0]: line.strip() for line in output.splitlines() if "/" in line}
+            self.apps = dict(sorted(components.items(), key=lambda item: len(item[0])))
         return self.apps
 
     def open_app(self, name: str) -> str:
@@ -454,8 +454,14 @@ class Device:
                     break
         if package is None:
             return f"No app with a home-screen icon matches {name!r}. Try another name."
-        shell(f"monkey -p {package} -c {LAUNCHER} 1")
-        time.sleep(1.5)
+        # am start is ~0.4 s quicker than monkey, and the look that follows waits for the app to finish opening.
+        # monkey stays as the fallback for packages that aren't in the launcher list.
+        component = self.launchable().get(package)
+        # The same intent and flags a launcher uses, so an app already open comes back where it was.
+        output = shell(f"am start -a android.intent.action.MAIN -c {LAUNCHER} -f 0x10200000 -n {component}") if component else ""
+        if not component or "Error" in output:
+            shell(f"monkey -p {package} -c {LAUNCHER} 1")
+            time.sleep(1.5)
         return f"Opened {package}."
 
     def newest_camera_file(self) -> str:
