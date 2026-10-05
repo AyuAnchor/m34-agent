@@ -167,9 +167,17 @@ class Bridge:
             cancelled=self.cancel.is_set,
         )
 
-    def notify(self, text: str) -> None:
-        if self.owner:
+    def notify(self, text: str) -> bool:
+        """Best effort, returns whether it was delivered: background loops call this, and a failed send
+        (e.g. while Wi-Fi reconnects) must not kill them."""
+        if not self.owner:
+            return False
+        try:
             self.tg.send(self.owner, text)
+            return True
+        except Exception as error:
+            log.warning(f"could not send notification: {error}")
+            return False
 
     def show_typing(self) -> None:
         """Telegram's "typing..." indicator, sent in the background so it never delays a step."""
@@ -571,14 +579,13 @@ class Bridge:
             if status is None or self.owner is None:
                 continue
             level, charging = status
+            # Only marked as sent once delivered, so an alert that hit a network drop is retried next check.
             if level < BATTERY_LOW and not alerted:
                 state = "charging" if charging else "not charging; is the charger unplugged or the power off?"
-                self.notify(f"Battery low: {level}% ({state}). I'll stop working when it runs out.")
-                log.info(f"low battery alert at {level}%")
-                alerted = True
+                alerted = self.notify(f"Battery low: {level}% ({state}). I'll stop working when it runs out.")
+                log.info(f"low battery alert at {level}% ({'sent' if alerted else 'not delivered, will retry'})")
             elif level >= BATTERY_REARM and alerted:
-                self.notify(f"Battery back up to {level}%.")
-                alerted = False
+                alerted = not self.notify(f"Battery back up to {level}%.")
 
     def check_phone_control(self) -> None:
         """After a start (usually a reboot), tell the owner if screen control doesn't come back."""
