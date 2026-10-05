@@ -30,6 +30,7 @@ MAX_HISTORY = 20
 MAX_MESSAGE = 4000
 APPROVAL_TIMEOUT_S = 15 * 60
 PROGRESS_LINES = 8
+OUTAGE_NOTICE_S = 10 * 60  # tell the owner once when the main models have been failing this long
 PROGRESS_EDIT_S = 2.0
 SCHEDULER_TICK_S = 20
 WARM_EVERY_S = 120  # keep a fresh connection to Telegram and each AI provider ready
@@ -136,6 +137,7 @@ class Bridge:
         self.started = 0.0
         self.actions: list[str] = []
         self.model = ""
+        self.outage_noticed = 0.0  # start of the model outage the owner was last told about
         self.progress_id: int | None = None  # set and cleared only by the progress sender thread
         self.last_edit = 0.0
         self.progress_jobs: queue.Queue[Callable[[], None]] = queue.Queue()
@@ -150,7 +152,7 @@ class Bridge:
         self.schedules = Schedules(getprop("persist.sys.timezone") or "UTC")
         self.shortcuts = Shortcuts()
         self.agent = Agent(
-            Router(self.config.get("providers", {}), notify=self.notify, usage=self.usage),
+            Router(self.config.get("providers", {}), usage=self.usage),
             self.device,
             self.memory,
             self.schedules,
@@ -340,7 +342,7 @@ class Bridge:
         waiting = "\nWaiting for your approval." if self.approvals else ""
         return (
             f"Working on: {self.task[:300]}\n"
-            f"Running {self.elapsed()}, {len(self.actions)} steps, model {self.model or 'starting'}.\n"
+            f"Running {self.elapsed()}, {len(self.actions)} steps, model {self.model or 'starting'}{self.fallback_note()}.\n"
             f"Last action: {last[:200]}{waiting}\n"
             f"Queued: {queued}{watching}"
         )
@@ -383,6 +385,27 @@ class Bridge:
             self.post_progress()
         if time.time() - self.last_edit >= PROGRESS_EDIT_S:
             self.update_progress("Working")
+        self.report_long_outage()
+
+    def report_long_outage(self) -> None:
+        """Model switches only show in the progress message, but a long outage is worth one message:
+        the fallback models are weaker, so a long task may go worse than usual."""
+        router = self.agent.router
+        since = router.outage_since()
+        if since is None or since == self.outage_noticed or time.time() - since < OUTAGE_NOTICE_S:
+            return
+        self.outage_noticed = since
+        self.notify(
+            f"The main AI models have had problems for {int(time.time() - since) // 60} min "
+            f"({router.note or router.last_failure}). Carrying on with {self.model}, which may be less reliable."
+        )
+
+    def fallback_note(self) -> str:
+        router = self.agent.router
+        if not router.note:
+            return ""
+        since = datetime.fromtimestamp(router.note_since, self.schedules.tz).strftime("%H:%M")
+        return f" ({router.note} since {since})"
 
     def update_progress(self, headline: str) -> None:
         if not self.actions:  # plain chat: no progress message was posted
@@ -392,7 +415,7 @@ class Bridge:
         lines = "\n".join(f"{first + i}. {step[:120]}" for i, step in enumerate(steps))
         text = (
             f"{headline}: {self.task[:200]}\n"
-            f"{self.elapsed()} · {len(self.actions)} steps · {self.model or 'starting'}\n\n{lines}"
+            f"{self.elapsed()} · {len(self.actions)} steps · {self.model or 'starting'}{self.fallback_note()}\n\n{lines}"
         )
         self.last_edit = time.time()
 
@@ -512,7 +535,7 @@ class Bridge:
         several_keys = {model.family for model in models if "#" in model.provider}
         rows = [("Model", "Used", "Now")]
         for model in models:
-            name = model.name.split("/")[-1].removeprefix("gemini-").removesuffix("-latest").removesuffix("-preview")
+            name = model.short
             if model.family in several_keys:
                 name += f" #{model.provider.partition('#')[2] or 1}"
             if model.reported:

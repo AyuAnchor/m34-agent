@@ -155,9 +155,12 @@ needs the phone, the following steps go to the smartest available model (Gemini 
 models mid-task is safe: tool calls made by another model get the placeholder "thought signature"
 Gemini requires.
 
-When a model hits a limit, the next one continues the same task and you get a "Switched to ..."
-message (only for switches caused by a problem, not routine routing). The cooldown follows the provider's own "retry in N seconds" hint when it gives one, so
-the best model comes back quickly. A used-up **daily** quota parks that model for 6 hours.
+When a model hits a limit or its provider is busy, the next one continues the same task. Instead of
+a message per switch, the progress message shows the reason, e.g. `flash-lite (flash busy at Google
+since 00:48)`, and you get one message only if the main models keep failing for 10 minutes. A rate
+limit follows the provider's own "retry in N seconds" hint when it gives one, so the best model
+comes back quickly. Server errors and network failures back off 1, 2, 4... minutes (up to 15), so a
+busy spell doesn't bounce the task between models. A used-up **daily** quota is retried hourly.
 
 ### Speed
 
@@ -608,8 +611,8 @@ Match originalhost m34 !exec "nc -z -G 2 <tailscale-ip> 8022 >/dev/null 2>&1"
 | Problem | Fix |
 |---|---|
 | `409 Conflict` in the log | Two bridges are running. `sv restart tg-bridge` (the run script kills strays) |
-| "Switched to ..." often | Free per-minute limits. Normal on long tasks |
-| "used up its daily quota" | Free daily limits; Gemini resets at midnight Pacific time |
+| "busy at Google" in the progress message | Google's servers are overloaded (HTTP 503). Usually passes within minutes |
+| "used up today's quota" | Free daily limits; Gemini resets at midnight Pacific time |
 | Camera tasks fail | The camera tools use the volume key as shutter (Samsung default). Check the camera app's "shooting methods" setting |
 | Time zone error at start | Old zone name from Android; add it to `LEGACY_ZONES` in `store.py` |
 | "All models are rate-limited" | Wait, or add more providers/keys |

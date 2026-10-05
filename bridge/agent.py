@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from device import MAX_AUDIO_S, SCREEN_PATH, Device, adb, getprop, is_temporary, phone_line_problem, ready_to_send
+from device import MAX_AUDIO_S, SCREEN_PATH, TOGGLES, Device, adb, getprop, is_temporary, phone_line_problem, ready_to_send
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -27,6 +27,9 @@ COOLDOWNS_PATH = STATE_DIR / "cooldowns.json"
 # Quotas used up "per day" free up sooner than the documented reset (Groq's window rolls, and Gemini has
 # answered hours before midnight Pacific), so a full model is tried again after this long.
 DAILY_RECHECK_S = 3600
+MAX_TROUBLE_WAIT_S = 900  # server errors and network failures back off 1, 2, 4... minutes, up to this
+TROUBLE_STALE_S = 900  # a problem not seen again for this long counts as over
+PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq"}
 PACIFIC = ZoneInfo("America/Los_Angeles")
 WORKSPACE_DIR = "/home/agent/agent"
 MAX_STEPS = 40
@@ -200,7 +203,14 @@ TOOLS = [
     ),
     function(
         "phone_status",
-        "Read volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb and battery.",
+        "Read volumes, brightness, screen timeout, auto-rotate, dark mode, Wi-Fi, airplane mode, Bluetooth, "
+        "do not disturb and battery.",
+    ),
+    function(
+        "toggle_setting",
+        "Turn a setting on or off directly.",
+        {"setting": prop("string", enum=list(TOGGLES)), "on": prop("boolean")},
+        ("setting", "on"),
     ),
     function("set_brightness", "Set screen brightness.", {"percent": prop("integer", "0-100")}, ("percent",)),
     function("speak", "Say something out loud on the phone.", {"text": prop("string")}, ("text",)),
@@ -356,6 +366,11 @@ class Model:
         return f"{self.provider}/{self.name}"
 
     @property
+    def short(self) -> str:
+        """Display name: "gemini/gemini-flash-lite-latest" -> "flash-lite"."""
+        return self.name.split("/")[-1].removeprefix("gemini-").removesuffix("-latest").removesuffix("-preview")
+
+    @property
     def family(self) -> str:
         """The API this model is served by: "gemini#2" (a second account's key) is still "gemini"."""
         return self.provider.split("#")[0]
@@ -387,15 +402,18 @@ class ProviderError(Exception):
 class Router:
     """Sends each request to the best model that isn't cooling down after a limit or error."""
 
-    def __init__(self, keys: dict[str, str], notify: Callable[[str], None], usage: Usage | None = None) -> None:
+    def __init__(self, keys: dict[str, str], usage: Usage | None = None) -> None:
         self.keys = keys
         self.usage = usage
         self.models = [model for model in MODELS if keys.get(model.provider)]
         families = {model.family for model in self.models}
         self.pools = {family: ConnectionPool(host) for family, (host, _) in ENDPOINTS.items() if family in families}
-        self.notify = notify
-        self.active: Model | None = None
         self.last_failure = ""
+        # Why requests are going to a fallback model, for the progress message; "" when they aren't.
+        self.note = ""
+        self.note_since = 0.0
+        # Models failing with server or network errors: label -> (first failure, latest failure).
+        self.trouble: dict[str, tuple[float, float]] = {}
         self.load_cooldowns()
 
     def load_cooldowns(self) -> None:
@@ -419,9 +437,10 @@ class Router:
         """Ask the best available model. fast_first tries the quickest models first (a task's first step:
         plain chat ends there); later steps go to the smartest."""
         order = sorted(self.models, key=lambda m: (m.fast == 0, m.fast)) if fast_first else self.models
-        failed = False
+        failed = skipped = False
         for model in order:
             if model.cooldown_until > time.time():
+                skipped = True
                 continue
             try:
                 message = self.call(model, messages)
@@ -434,7 +453,7 @@ class Router:
                     except ProviderError as retry_error:
                         error = retry_error
                     else:
-                        return self.succeeded(model, message, failed)
+                        return self.succeeded(model, message, failed, skipped, fast_first)
                 self.penalize(model, error.status, error.detail, retry_after(error.headers, error.detail))
                 failed = True
                 continue
@@ -442,16 +461,30 @@ class Router:
                 self.penalize(model, 0, str(error), None)
                 failed = True
                 continue
-            return self.succeeded(model, message, failed)
+            return self.succeeded(model, message, failed, skipped, fast_first)
         raise NoModelAvailable("All models are rate-limited or failing right now. Try again later.")
 
-    def succeeded(self, model: Model, message: dict[str, Any], after_failure: bool) -> tuple[dict[str, Any], Model]:
+    def succeeded(
+        self, model: Model, message: dict[str, Any], failed: bool, skipped: bool, fast_first: bool
+    ) -> tuple[dict[str, Any], Model]:
+        """Keep track of why a fallback model is answering, for the progress message."""
         model.strikes = 0
         model.out_of_quota = False
-        if after_failure and self.active not in (None, model):  # only switches forced by a problem are news
-            self.notify(f"Switched to {model.label} ({self.last_failure}).")
-        self.active = model
+        self.trouble.pop(model.label, None)
+        if failed:
+            if not self.note:
+                self.note_since = time.time()
+            self.note = self.last_failure
+        elif not skipped and not fast_first:  # the first-choice model answered: back to normal
+            self.note = ""
+            self.trouble.clear()
         return message, model
+
+    def outage_since(self) -> float | None:
+        """When the current run of server or network failures began, or None if there isn't one."""
+        now = time.time()
+        ongoing = [first for first, last in self.trouble.values() if now - last < TROUBLE_STALE_S]
+        return min(ongoing) if ongoing else None
 
     def call(self, model: Model, messages: list[dict[str, Any]]) -> dict[str, Any]:
         body: dict[str, Any] = {"model": model.name, "messages": prepare(model, messages), "tools": TOOLS}
@@ -477,23 +510,32 @@ class Router:
         return choices[0]["message"]
 
     def penalize(self, model: Model, code: int, detail: str, hint: float | None) -> None:
+        provider = PROVIDER_NAMES.get(model.family, model.family)
+        model.strikes += 1
         if code == 429:
-            model.strikes += 1
             if "perday" in detail.lower().replace(" ", ""):
                 model.out_of_quota = True
                 if match := re.search(r'"quotaValue":\s*"(\d+)"', detail):
                     model.daily = int(match[1])
                 wait = min(seconds_until_quota_reset(), DAILY_RECHECK_S)
-                self.last_failure = f"{model.label} used up its daily quota"
+                self.last_failure = f"{model.short} used up today's quota"
             else:
                 wait = hint + 2 if hint else min(60 * 2 ** (model.strikes - 1), 3600)
-                self.last_failure = f"{model.label} hit its rate limit"
+                self.last_failure = f"{model.short} hit its rate limit"
         elif code == 0 or code >= 500:
-            wait = 60
-            self.last_failure = f"{model.label} is unreachable"
+            # Busy spells last minutes, so retrying every minute just bounces back and forth.
+            wait = min(60 * 2 ** (model.strikes - 1), MAX_TROUBLE_WAIT_S)
+            if code == 0:
+                self.last_failure = f"can't reach {provider}"
+            elif code == 503:
+                self.last_failure = f"{model.short} busy at {provider}"
+            else:
+                self.last_failure = f"{model.short}: server error at {provider}"
+            first, _ = self.trouble.get(model.label, (time.time(), 0.0))
+            self.trouble[model.label] = (first, time.time())
         else:  # often our request's fault rather than the model's, so keep it short
             wait = 120
-            self.last_failure = f"{model.label} rejected the request"
+            self.last_failure = f"{model.short} rejected the request"
         model.cooldown_until = time.time() + wait
         self.save_cooldowns()
         log.warning(f"{model.label} failed ({code}), cooling down {wait:.0f}s: {detail[:300]}")
@@ -629,6 +671,7 @@ class Agent:
             ),
             "set_brightness": lambda a, m: self.device.set_brightness(as_int(a.get("percent")) or 0),
             "phone_status": lambda a, m: self.device.status(),
+            "toggle_setting": lambda a, m: self.device.toggle(str(a.get("setting", "")), as_bool(a.get("on"))),
             "speak": lambda a, m: self.device.speak(str(a.get("text", ""))),
             "search_contacts": lambda a, m: self.device.search_contacts(str(a.get("query", ""))),
             "make_call": lambda a, m: phone_line_problem() or self.approved(
@@ -769,7 +812,7 @@ class Agent:
             return "Invalid JSON arguments.", None
         log.info(f"{model.label} -> {name} {args}")
         detail = " ".join(str(value) for value in args.values() if value not in (None, ""))
-        self.on_action(model.label, f"{name} {detail}".strip())
+        self.on_action(model.short, f"{name} {detail}".strip())
         handler = self.handlers.get(name)
         if handler is None:
             return f"Unknown tool: {name}", None

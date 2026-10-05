@@ -54,9 +54,17 @@ STATUS_SCRIPT = (
     "echo airplane=$(settings get global airplane_mode_on);"
     "echo bluetooth=$(settings get global bluetooth_on);"
     "echo zen=$(settings get global zen_mode);"
+    "echo rotate=$(settings get system accelerometer_rotation);"
+    "echo night=$(cmd uimode night);"
     "cmd wifi status | grep -m1 'connected to';"
     "dumpsys battery | grep -E '^  (level|status):'"
 )
+TOGGLES = {  # setting -> (command to turn it on, command to turn it off)
+    "auto_rotate": ("settings put system accelerometer_rotation 1", "settings put system accelerometer_rotation 0"),
+    "dark_mode": ("cmd uimode night yes", "cmd uimode night no"),
+    "bluetooth": ("cmd bluetooth_manager enable", "cmd bluetooth_manager disable"),
+    "do_not_disturb": ("cmd notification set_dnd on", "cmd notification set_dnd off"),
+}
 LARGE_VIDEO_BYTES = 20 * 1024 * 1024  # compress videos above this before sending
 MOTION_FPS = 2
 MOTION_SIZE = (160, 90)
@@ -584,7 +592,7 @@ class Device:
         return f"Opened {url}."
 
     def status(self) -> str:
-        """Volumes, brightness, connectivity and battery in one adb call (~0.7 s), so the AI doesn't dig
+        """Volumes, brightness, display, connectivity and battery in one adb call (~0.7 s), so the AI doesn't dig
         through dumpsys output over many steps."""
         output = shell(STATUS_SCRIPT)
         values = dict(re.findall(r"^(\w+)=(.*)$", output, re.MULTILINE))
@@ -607,12 +615,20 @@ class Device:
             f"Volume: {', '.join(volumes) or 'unknown'}; ringer {values.get('ringer', '?').lower()}",
             f"Brightness: {round(100 * int(brightness) / 255) if brightness.isdigit() else '?'}%"
             f"{' (auto)' if values.get('auto_brightness') == '1' else ''}",
-            f"Screen timeout: {int(timeout) // 1000 if timeout.isdigit() else '?'} s",
+            f"Screen timeout: {int(timeout) // 1000 if timeout.isdigit() else '?'} s; auto-rotate: {on('rotate')}; "
+            f"dark mode: {'on' if values.get('night', '').endswith('yes') else 'off'}",
             f"Wi-Fi: {wifi[1] if wifi else 'not connected'}",
             f"Airplane mode: {on('airplane')}; Bluetooth: {on('bluetooth')}; "
             f"Do not disturb: {'off' if values.get('zen') in ('0', None) else 'on'}",
             f"Battery: {f'{level[1]}%, ' + ('charging' if charging else 'not charging') if level else 'unknown'}",
         ])
+
+    def toggle(self, setting: str, on: bool) -> str:
+        commands = TOGGLES.get(setting)
+        if commands is None:
+            return f"Setting must be one of: {', '.join(TOGGLES)}."
+        shell(commands[0 if on else 1])
+        return f"{setting.replace('_', ' ').capitalize()} turned {'on' if on else 'off'}."
 
     def set_volume(self, percent: int, stream: str) -> str:
         stream_id = VOLUME_STREAMS.get(stream)
