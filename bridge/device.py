@@ -393,6 +393,15 @@ class Device:
         match = re.search(r'connected to "([^"]*)"', shell("cmd wifi status"))
         return match[1] if match else None
 
+    def ensure_wifi(self) -> str | None:
+        """With no SIM, Wi-Fi is the phone's only link to Telegram, so it must never stay off (a mistaken tap
+        on its switch would otherwise cut the bot off). Uses adb on the phone itself, which needs no network.
+        Returns a note if it acted."""
+        if shell("cmd wifi status | head -1") != "Wifi is disabled":
+            return None
+        shell("cmd wifi set-wifi-enabled enabled")
+        return "Wi-Fi was off, so I turned it back on (it's the phone's only connection)."
+
     def ensure_wireless_debugging(self) -> str | None:
         """Keep Wireless debugging on, approving Android's "Allow wireless debugging on this network?"
         prompt on a new network. Recovery after a reboot needs it, and nobody can tap that prompt then.

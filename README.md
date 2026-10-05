@@ -252,6 +252,11 @@ checks every minute that wireless debugging is on; on a new network it answers t
 "Allow USB debugging?". Any network the phone has been on while running is therefore ready for a
 reboot. If screen control still isn't back 6 minutes after a start, the bot messages you.
 
+The same check turns **Wi-Fi** back on if it's off (with no SIM it's the phone's only connection, so
+a mistaken tap on its switch would otherwise cut the bot off), and tells you once it's back. It uses
+adb on the phone itself, which doesn't need a network. If that ever fails, plug in USB and run
+`adb shell cmd wifi set-wifi-enabled enabled`.
+
 **Changing Wi-Fi:** keep a phone hotspot saved on the M34 as a rescue network. If the home Wi-Fi
 changes, turn the hotspot on near the phone; the bot comes online through it, then send
 `/wifi "New network" "password"`. The new network gets trusted automatically. The one case that

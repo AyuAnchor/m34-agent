@@ -596,10 +596,16 @@ class Bridge:
             )
 
     def guard_wireless_debugging(self) -> None:
-        """Keep wireless debugging on and trusted on whatever Wi-Fi the phone is on, so a reboot there
-        can recover by itself (Android asks per network, and nobody can answer at boot)."""
+        """Keep Wi-Fi on, and wireless debugging on and trusted on whatever Wi-Fi the phone is on, so a
+        reboot there can recover by itself (Android asks per network, and nobody can answer at boot)."""
         while True:
             time.sleep(WIRELESS_GUARD_S)
+            try:  # needs no screen, so it doesn't wait for the device lock
+                if note := self.device.ensure_wifi():
+                    log.warning(note)
+                    self.notify(note)
+            except Exception:
+                log.exception("Wi-Fi guard failed")
             if not self.device_lock.acquire(blocking=False):
                 continue  # a task or command is using the screen; try again next round
             try:
