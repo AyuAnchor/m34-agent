@@ -72,6 +72,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `record_audio` | Record from the microphone only (Termux:API), up to 2 minutes |
 | `set_alarm`, `set_timer` | Direct to the clock app (needs a clock app installed) |
 | `open_url`, `set_volume`, `set_brightness` | Direct actions, no tapping through settings |
+| `open_settings` | Jump straight to a Settings page (display, sound, battery, apps, one app's info page...) instead of tapping through menus |
 | `phone_status` | Volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb and battery in one step |
 | `speak` | Say something out loud through the phone's speaker |
 | `search_contacts` | Find contacts by name or number |
@@ -91,10 +92,14 @@ buttons and fields, draws a numbered box on each (the "Set-of-Mark" technique), 
 "tap 13" instead of "tap 840, 835". If something has no number (a game, a camera preview), it
 taps on a 0-1000 scale, which is how Gemini models naturally describe positions.
 
-After `tap`, `type_text`, `scroll`, `key`, `open_app` and `open_url` the new screen comes back
+After `tap`, `type_text`, `scroll`, `key`, `open_app`, `open_settings` and `open_url` the new screen comes back
 automatically, so the AI doesn't spend a separate round trip on `look` (about half the AI calls).
 The screen is read only once it's stable (two identical reads in a row, ~250 ms each), so a page that's still
 animating isn't mistaken for "my tap did nothing".
+
+The list leaves out what's on every screen (status bar icons, the Back/Home/Recents buttons, the edge
+panel handle; the `key` tool presses those) and folds each settings row's title and switch into one
+line with its state (`Eye comfort shield unchecked`). On Settings pages that cuts the list by ~60%.
 
 Older screen lists are compacted to just their text ("earlier screen showed: Android version; 16"):
 the AI keeps the facts it read while the re-sent conversation stays small.
@@ -486,7 +491,8 @@ Telegram's "/" menu.
 Commands that change the phone wait their turn: while an AI task or a watch clip is using the
 phone they reply "Busy", so nothing fights over the screen. `/battery`, `/info`, `/screen` and `/status` always work.
 
-Photos take ~14 s (the camera app needs ~9 s to process a photo) and audio adds ~5 s
+Photos take ~7.5 s: the camera opens in ~1 s and needs ~5 s to save a photo (Auto HDR is switched
+off in the camera's settings, which saved ~1 s; it merges several frames per shot). Audio adds ~5 s
 (Termux:API startup). `/say` replies at once and speaks in the background.
 
 ### AI tasks and control

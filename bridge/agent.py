@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from device import MAX_AUDIO_S, SCREEN_PATH, TOGGLES, Device, adb, getprop, is_temporary, phone_line_problem, ready_to_send
+from device import MAX_AUDIO_S, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, getprop, is_temporary, phone_line_problem, ready_to_send
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -40,13 +40,13 @@ LOOP_WINDOW = 6
 # Tools that use the screen, camera or microphone take the phone (device lock) for the rest of the task.
 # Chat and everything else never wait for a motion watch or a running command.
 SCREEN_TOOLS = {
-    "look", "tap", "type_text", "scroll", "key", "open_app", "open_url", "take_photo", "record_video",
+    "look", "tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url", "take_photo", "record_video",
     "record_audio", "send_screenshot", "phone", "make_call", "send_email",
 }
 DEVICE_WAIT_S = 60  # a watch clip or quick command finishes well within this
-SHOWS_SCREEN_AFTER = {"tap", "type_text", "scroll", "key", "open_app", "open_url"}
+SHOWS_SCREEN_AFTER = {"tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url"}
 SCREEN_MARKER = "Elements on screen"
-ELEMENT_LINE = re.compile(r"^\[\d+\] (.*?)(?: #\S+)?(?: (?:checked|selected|focused)\b.*)?$")
+ELEMENT_LINE = re.compile(r"^\[\d+\] (.*?)(?: #\S+)?(?: (?:checked|unchecked|selected|focused)\b.*)?$")
 MAX_OLD_SCREEN = 1500
 REFUSAL = re.compile(r"\b(I(?:'|’)?m sorry|I can(?:'|’)?t|I cannot|I(?:'|’)?m (?:not able|unable)|I won(?:'|’)?t)\b", re.IGNORECASE)
 SCHEDULED_PREFIX = re.compile(r"^\[Scheduled #\d+\]\s*")
@@ -86,14 +86,14 @@ messages you on Telegram. The touchscreen is broken, so you act only through you
 Using the phone:
 - If the message is just conversation (a greeting, or a question you can answer), reply directly \
 without using tools. Never guess the phone's state (settings, screen, files): check it with a tool.
-- Call look before your first action. After tap, type_text, scroll, key, open_app and open_url you \
+- Call look before your first action. After tap, type_text, scroll, key, open_app, open_settings and open_url you \
 automatically get the new screen, so don't call look again after them. Tap by element number from \
 the latest screen; numbers change after every action.
 - Only when the target has no number, tap with x and y on a 0-1000 scale of the screenshot \
 (0,0 is top-left, 1000,1000 is bottom-right).
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
-settings status, calls, messages, motion watch). send_file delivers files to the owner.
+settings status, calls, messages, motion watch). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
 - For anything from the internet, use web_search and fetch_url (about a second, no screen). Use the \
 phone's browser only when the owner wants it shown on the phone or a site needs tapping.
 - Do exactly what the owner asked. If no tool can do it, say so and ask; never substitute something \
@@ -170,6 +170,12 @@ TOOLS = [
         ("name",),
     ),
     function("open_app", "Open an app by name.", {"name": prop("string")}, ("name",)),
+    function(
+        "open_settings",
+        "Open a Settings page directly instead of tapping through menus. page 'app' opens one app's info page.",
+        {"page": prop("string", enum=[*SETTINGS_PAGES, "app"]), "app": prop("string", "app name, for page 'app'")},
+        ("page",),
+    ),
     function("wait", "Wait for something to load.", {"seconds": prop("integer", f"1-{MAX_WAIT_S}")}, ("seconds",)),
     function("take_photo", "Take a photo; returns its path.", {"front": prop("boolean")}),
     function(
@@ -677,6 +683,7 @@ class Agent:
             ),
             "set_brightness": lambda a, m: self.device.set_brightness(as_int(a.get("percent")) or 0),
             "phone_status": lambda a, m: self.device.status(),
+            "open_settings": lambda a, m: self.device.open_settings(str(a.get("page", "")), str(a.get("app") or "")),
             "toggle_setting": lambda a, m: self.device.toggle(str(a.get("setting", "")), as_bool(a.get("on"))),
             "speak": lambda a, m: self.device.speak(str(a.get("text", ""))),
             "search_contacts": lambda a, m: self.device.search_contacts(str(a.get("query", ""))),

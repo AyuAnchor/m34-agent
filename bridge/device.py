@@ -39,6 +39,11 @@ STABLE_TIMEOUT_S = 2.5
 MAX_VIDEO_S = 30
 MAX_AUDIO_S = 120
 SAVE_WAIT_S = 12
+CAMERA_READY_S = 6  # the camera app usually shows its controls within ~1 s
+# On opening, the camera briefly shows the back lens's controls before restoring the last-used lens
+# (~0.4 s), so the lens is only trusted once its label has held this long.
+CAMERA_SETTLE_S = 0.6
+FILE_POLL_S = 0.3
 # Termux:API commands; Termux's files are visible inside Debian at the same paths.
 TERMUX_BIN = "/data/data/com.termux/files/usr/bin"
 MIC_RECORDER = f"{TERMUX_BIN}/termux-microphone-record"
@@ -74,6 +79,32 @@ MOTION_SKIP_S = 1.0  # ignore the first second while the camera settles its expo
 PHONE_NUMBER = re.compile(r"\+?[\d\s()-]{3,20}")
 LAUNCHER = "android.intent.category.LAUNCHER"
 # Apps whose package name doesn't contain their everyday name.
+SETTINGS_PAGES = {
+    "main": "android.settings.SETTINGS",
+    "wifi": "android.settings.WIFI_SETTINGS",
+    "bluetooth": "android.settings.BLUETOOTH_SETTINGS",
+    "connections": "android.settings.WIRELESS_SETTINGS",
+    "display": "android.settings.DISPLAY_SETTINGS",
+    "eye_comfort": "android.settings.NIGHT_DISPLAY_SETTINGS",
+    "sound": "android.settings.SOUND_SETTINGS",
+    "notifications": "android.settings.NOTIFICATION_SETTINGS",
+    "app_notifications": "android.settings.ALL_APPS_NOTIFICATION_SETTINGS",
+    "do_not_disturb": "android.settings.ZEN_MODE_SETTINGS",
+    "apps": "android.settings.MANAGE_APPLICATIONS_SETTINGS",
+    "battery": "android.intent.action.POWER_USAGE_SUMMARY",
+    "battery_saver": "android.settings.BATTERY_SAVER_SETTINGS",
+    "storage": "android.settings.INTERNAL_STORAGE_SETTINGS",
+    "location": "android.settings.LOCATION_SOURCE_SETTINGS",
+    "security": "android.settings.SECURITY_SETTINGS",
+    "privacy": "android.settings.PRIVACY_SETTINGS",
+    "accounts": "android.settings.SYNC_SETTINGS",
+    "date_time": "android.settings.DATE_SETTINGS",
+    "language": "android.settings.LOCALE_SETTINGS",
+    "accessibility": "android.settings.ACCESSIBILITY_SETTINGS",
+    "about_phone": "android.settings.DEVICE_INFO_SETTINGS",
+}
+# NEW_TASK | CLEAR_TOP: otherwise Settings ignores a new page while another Settings page is showing.
+SETTINGS_FLAGS = " -f 0x14000000"
 APP_ALIASES = {"playstore": "com.android.vending", "files": "com.sec.android.app.myfiles"}
 ALARM_EXTRA = "android.intent.extra.alarm"
 KEYS = {
@@ -207,6 +238,23 @@ class Element:
         return (self.box[0] + self.box[2]) // 2, (self.box[1] + self.box[3]) // 2
 
 
+STATUS_BAR_BOTTOM = 80  # px; status bar icons (clock, notification icons, signal) sit above this
+NAVIGATION_BUTTONS = {"back", "home", "recent_apps"}  # the key tool presses these
+EDGE_PANEL_HANDLE = {"trigger_container", "trigger_view"}
+
+
+def is_chrome(package: str, resource: str, bounds: list[int]) -> bool:
+    """Status bar icons, navigation buttons and the edge panel handle: on every screen, never the target.
+    The pulled-down notification shade is also system UI but sits lower, so it stays."""
+    if package == "com.android.systemui":
+        return bounds[3] <= STATUS_BAR_BOTTOM or resource in NAVIGATION_BUTTONS
+    return package == "com.sec.android.app.launcher" and resource in EDGE_PANEL_HANDLE
+
+
+def contains(outer: tuple[int, int, int, int], inner: list[int]) -> bool:
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
+
+
 def node_label(node: ET.Element) -> str:
     """A node's own text, or the first text inside it (clickable rows often hold their label in a child)."""
     for child in node.iter("node"):
@@ -248,7 +296,8 @@ class Device:
             root = ET.fromstring(xml)
         except ET.ParseError:
             return []
-        elements, seen = [], set()
+        elements: list[Element] = []
+        seen = set()
         for node in root.iter("node"):
             interactive = any(node.get(flag) == "true" for flag in ("clickable", "long-clickable", "checkable"))
             own_label = (node.get("text") or node.get("content-desc") or "").strip()
@@ -257,13 +306,26 @@ class Device:
             bounds = [int(n) for n in re.findall(r"\d+", node.get("bounds", ""))]
             if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
                 continue  # hidden or zero-size
+            resource = (node.get("resource-id") or "").rsplit("/", 1)[-1]
+            if is_chrome(node.get("package", ""), resource, bounds):
+                continue
             label = own_label or node_label(node)
             key = (tuple(bounds), label)
             if key in seen:
                 continue
             seen.add(key)
-            flags = " ".join(f for f in ("checked", "selected", "focused") if node.get(f) == "true")
-            resource = (node.get("resource-id") or "").rsplit("/", 1)[-1]
+            checkable = node.get("checkable") == "true"
+            state = ("checked" if node.get("checked") == "true" else "unchecked") if checkable else ""
+            flags = " ".join(f for f in (state, *(f for f in ("selected", "focused") if node.get(f) == "true")) if f)
+            # A settings row is the row, its title, its summary and an unlabeled switch: keep one line for the
+            # row (title and switch state) plus the summary, which often explains why something is off.
+            row = next((e for e in reversed(elements[-4:]) if contains(e.box, bounds)), None)
+            if row is not None:
+                if not interactive and label == row.label:
+                    continue
+                if checkable and own_label in ("", row.label):
+                    row.flags = " ".join(f for f in (state, row.flags) if f)
+                    continue
             elements.append(Element(label, resource, tuple(bounds), flags))
         return elements[:MAX_ELEMENTS]
 
@@ -473,15 +535,32 @@ class Device:
             self.apps = dict(sorted(components.items(), key=lambda item: len(item[0])))
         return self.apps
 
-    def open_app(self, name: str) -> str:
+    def find_package(self, name: str) -> str | None:
         query = re.sub(r"\s+", "", name.lower())
-        package = APP_ALIASES.get(query)
-        if package is None:
-            for refresh in (False, True):
-                matches = [p for p in self.launchable(refresh) if query in p.lower()]
-                if matches:
-                    package = matches[0]  # shortest name is usually the main app
-                    break
+        if package := APP_ALIASES.get(query):
+            return package
+        for refresh in (False, True):
+            matches = [p for p in self.launchable(refresh) if query in p.lower()]
+            if matches:
+                return matches[0]  # shortest name is usually the main app
+        return None
+
+    def open_settings(self, page: str, app: str = "") -> str:
+        """Jump straight to a Settings page (or one app's info page) instead of tapping through menus."""
+        if page == "app":
+            package = self.find_package(app) if app else None
+            if package is None:
+                return f"No app matches {app!r}. Give the app's name."
+            start_activity("android.settings.APPLICATION_DETAILS_SETTINGS", SETTINGS_FLAGS, data=f"package:{package}")
+            return f"Opened the app info page for {package}."
+        action = SETTINGS_PAGES.get(page)
+        if action is None:
+            return f"Page must be one of: {', '.join(SETTINGS_PAGES)}, app."
+        start_activity(action, SETTINGS_FLAGS)
+        return f"Opened {page.replace('_', ' ')} settings."
+
+    def open_app(self, name: str) -> str:
+        package = self.find_package(name)
         if package is None:
             return f"No app with a home-screen icon matches {name!r}. Try another name."
         # am start is ~0.4 s quicker than monkey, and the look that follows waits for the app to finish opening.
@@ -497,13 +576,31 @@ class Device:
     def newest_camera_file(self) -> str:
         return shell(f"ls -t {CAMERA_DIR} 2>/dev/null | head -1")
 
-    def face_camera(self, front: bool) -> None:
-        """The camera app ignores facing hints in intents and remembers the last lens, so flip it via its button."""
-        for element in self.read_elements():
-            match = SWITCH_CAMERA.search(element.label)
-            if match and (match[1].lower() == "front") == front:
-                shell("input tap {} {}".format(*element.center))
-                time.sleep(2)
+    def camera_switch(self, video: bool) -> Element | None:
+        """The camera app's switch-lens button, once the camera is ready to shoot in the wanted mode: the
+        controls show before a switch from photo to video mode finishes, so the shutter's label is checked too."""
+        elements = self.read_elements()
+        shutter = "Start recording" if video else "Take picture"
+        if not any(e.label == shutter for e in elements):
+            return None
+        return next((e for e in elements if SWITCH_CAMERA.search(e.label)), None)
+
+    def face_camera(self, front: bool, video: bool = False) -> None:
+        """The camera app ignores facing hints in intents and remembers the last lens, so flip it via its button.
+        Waits for the camera to be ready (and, after a flip, for the other lens) instead of fixed pauses."""
+        deadline = time.time() + CAMERA_READY_S
+        button, since = self.camera_switch(video), time.time()
+        while time.time() < deadline and (button is None or time.time() - since < CAMERA_SETTLE_S):
+            again = self.camera_switch(video)
+            if again is None or button is None or again.label != button.label:
+                button, since = again, time.time()
+        if button is None or (SWITCH_CAMERA.search(button.label)[1].lower() == "front") != front:
+            return  # not found, or already on the wanted lens
+        shell("input tap {} {}".format(*button.center))
+        while time.time() < deadline:
+            flipped = self.camera_switch(video)
+            if flipped and flipped.label != button.label:
+                time.sleep(0.5)  # the new lens needs a moment to focus and expose
                 return
 
     def capture(self, video: bool, seconds: int, front: bool) -> str:
@@ -511,15 +608,15 @@ class Device:
         before = self.newest_camera_file()
         shell("input keyevent KEYCODE_WAKEUP")
         shell(f"am start -a android.media.action.{'VIDEO_CAMERA' if video else 'STILL_IMAGE_CAMERA'}")
-        time.sleep(3)
-        self.face_camera(front)
+        self.face_camera(front, video)
         shell("input keyevent KEYCODE_VOLUME_DOWN")
         if video:
             time.sleep(seconds)
             shell("input keyevent KEYCODE_VOLUME_DOWN")
         extensions = MEDIA_EXTENSIONS["video" if video else "photo"]
-        for _ in range(SAVE_WAIT_S):  # the file appears only after the camera finishes processing
-            time.sleep(1)
+        deadline = time.time() + SAVE_WAIT_S
+        while time.time() < deadline:  # the file appears only after the camera finishes processing (~5 s)
+            time.sleep(FILE_POLL_S)
             newest = self.newest_camera_file()
             if newest and newest != before and newest.lower().endswith(extensions):
                 return f"{CAMERA_DIR}/{newest}"
