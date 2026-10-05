@@ -240,7 +240,15 @@ Requests need at least two keywords, so chat like "hi" never becomes a shortcut,
 8 steps aren't saved (they usually wandered). File paths are saved as "the file from the previous
 step". When a similar request comes in (at least half its keywords in common), the AI gets those steps
 as a hint, so it skips the exploring but still checks each screen. A shorter route for the same
-request replaces the old one. Calls, SMS, email, shell commands, contacts, memory and schedules
+request replaces the old one.
+
+When a request has **exactly the same keywords** as a saved one, the route is **replayed directly**,
+without asking the AI at each step (about 1.3 s saved per step, and fewer free requests used). The AI
+then looks at the final screen once and replies, or carries on if something differs. Replay stops at
+the first step that fails and hands over to the AI. A similar but different request ("record 10
+seconds" vs a saved "record 5 seconds") only gets the hint, never a replay. Routes with a tap by
+coordinates aren't replayed, and shortcuts saved before this feature become replayable the next time
+that request finishes. Calls, SMS, email, shell commands, contacts, memory and schedules
 are never saved. `/shortcuts` lists them, `/delshortcut N` deletes one.
 
 ### After a reboot

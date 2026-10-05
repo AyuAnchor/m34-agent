@@ -57,6 +57,8 @@ SHORTCUT_SKIP = {
     "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "stop_watch", "ask_owner",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs usually wandered; not worth replaying
+PREVIOUS_FILE = "<the file from the previous step>"
+SAVED_FILE = re.compile(r"(/(?:sdcard|storage|data)/\S+?\.\w+)(?=\.?(?:\s|$))")
 FAILED_RESULTS = (
     "Tool error", "No element", "There is no element", "Blocked", "The owner", "Unknown tool",
     "Invalid JSON", "Capture failed", "Could not", "Timed out", "Cancelled", "No app", "Give an element",
@@ -592,25 +594,24 @@ def is_refusal(message: dict[str, Any]) -> bool:
     return not message.get("tool_calls") and bool(REFUSAL.search(message.get("content") or ""))
 
 
-def shortcut_step(call: dict[str, Any], result: str) -> str | None:
-    """One worked step for a shortcut, by visible text rather than element number (numbers change).
-    Failed, read-only and sensitive steps are left out."""
+def shortcut_step(call: dict[str, Any], result: str) -> tuple[str, dict[str, Any] | None] | None:
+    """One worked step for a shortcut: a description for the AI, and the tool call to replay it (None if
+    it can't be replayed safely). Taps are kept by visible text, since element numbers change; a tap by
+    coordinates stays in the description but makes the route unreplayable. Failed, read-only and sensitive
+    steps are left out."""
     name = call["function"]["name"]
     if name in SHORTCUT_SKIP or result.startswith(FAILED_RESULTS):
         return None
     if name == "tap" and (match := TAPPED.match(result)):
-        return f'tap "{match[1]}"'
+        return f'tap "{match[1]}"', {"name": "tap", "args": {"text": match[1]}}
     try:
         args = json.loads(call["function"].get("arguments") or "{}")
     except json.JSONDecodeError:
         return None
     # A file path from one run means nothing in the next: point at the new file instead.
-    detail = " ".join(
-        f"{key}={'<the file from the previous step>' if key == 'path' else value}"
-        for key, value in args.items()
-        if value not in (None, "")
-    )
-    return f"{name} {detail}".strip()
+    args = {key: PREVIOUS_FILE if key == "path" else value for key, value in args.items() if value not in (None, "")}
+    detail = " ".join(f"{key}={value}" for key, value in args.items())
+    return f"{name} {detail}".strip(), None if name == "tap" else {"name": name, "args": args}
 
 
 def drop_old_images(messages: list[dict[str, Any]]) -> None:
@@ -618,6 +619,11 @@ def drop_old_images(messages: list[dict[str, Any]]) -> None:
     for message in messages:
         if isinstance(message.get("content"), list):
             message["content"] = "[earlier screenshot removed]"
+
+
+# Stands in for a model while a saved route replays: names the steps in logs and progress, and skips
+# screenshots until the AI looks at the result.
+REPLAY_MODEL = Model("replay", "saved-route", vision=False)
 
 
 class Agent:
@@ -746,7 +752,9 @@ class Agent:
     def steps(self, history: list[dict[str, Any]], task: str) -> str:
         request = SCHEDULED_PREFIX.sub("", task)
         prompt = task
-        if shortcut := self.shortcuts.match(request):
+        shortcut = self.shortcuts.match(request)
+        replayable = shortcut and shortcut.get("calls") and self.shortcuts.same_request(shortcut, request)
+        if shortcut and not replayable:
             steps = "\n".join(f"{n}. {step}" for n, step in enumerate(shortcut["steps"], 1))
             prompt = (
                 f"{task}\n\n(Hint: a similar earlier request, \"{shortcut['task']}\", worked with these steps:\n"
@@ -755,8 +763,10 @@ class Agent:
             log.info(f"offering shortcut #{shortcut['id']} for: {request[:80]}")
         messages = [{"role": "system", "content": self.system_prompt()}, *history, {"role": "user", "content": prompt}]
         recent: list[str] = []
-        done_steps: list[str] = []
+        done_steps: list[tuple[str, dict[str, Any] | None]] = []
         went_in_circles = False
+        if replayable:
+            done_steps = self.replay(shortcut, messages)
         for step in range(MAX_STEPS):
             if self.cancelled():
                 return "Stopped."
@@ -773,7 +783,9 @@ class Agent:
             calls = message.get("tool_calls") or []
             if not calls:
                 if done_steps and len(done_steps) <= MAX_SHORTCUT_STEPS and not went_in_circles:
-                    self.shortcuts.save(request, done_steps)
+                    # Replayable only if every step is, so a replay never skips a step it can't redo.
+                    calls = [replay for _, replay in done_steps]
+                    self.shortcuts.save(request, [text for text, _ in done_steps], calls if all(calls) else [])
                 return (message.get("content") or "").strip() or "(no reply)"
             signature = json.dumps([(c["function"]["name"], c["function"].get("arguments")) for c in calls])
             recent = (recent + [signature])[-LOOP_WINDOW:]
@@ -803,6 +815,49 @@ class Agent:
                 recent = []
                 went_in_circles = True
         return "Stopped: too many steps without finishing. Try breaking the task into smaller ones."
+
+    def replay(self, shortcut: dict[str, Any], messages: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any] | None]]:
+        """Run a saved route for this exact request without asking the AI at each step (~1.3 s saved per
+        step), stopping at the first step that fails. The steps go into the conversation as if the AI had
+        made them, so the AI then checks the result on the current screen and finishes or carries on."""
+        log.info(f"replaying shortcut #{shortcut['id']} ({len(shortcut['calls'])} steps)")
+        calls, results, done = [], [], []
+        last_file = None
+        for number, saved in enumerate(shortcut["calls"]):
+            if self.cancelled():
+                break
+            args = dict(saved["args"])
+            if args.get("path") == PREVIOUS_FILE:
+                if last_file is None:
+                    break
+                args["path"] = last_file
+            call = {"id": f"replay-{number}", "type": "function", "function": {"name": saved["name"], "arguments": json.dumps(args)}}
+            result, _ = self.execute(call, REPLAY_MODEL)
+            calls.append(call)
+            results.append(result)
+            if result.startswith(FAILED_RESULTS):
+                log.info(f"replay stopped at step {number + 1}: {result[:120]}")
+                break
+            if match := SAVED_FILE.search(result):
+                last_file = match[1]
+            if described := shortcut_step(call, result):
+                done.append(described)
+        if not calls:
+            return done
+        messages.append({"role": "assistant", "content": None, "tool_calls": calls})
+        messages.extend({"role": "tool", "tool_call_id": c["id"], "content": r} for c, r in zip(calls, results))
+        drop_old_screen_lists(messages, len(messages))
+        screen, image = self.device.look(with_image=True) if self.claim_device() else ("(screen unavailable)", None)
+        total = len(shortcut["calls"])
+        outcome = "All of them ran." if len(done) == total else f"It stopped after {len(calls)} of {total} steps."
+        note = (
+            f"These steps were replayed automatically from a route that worked before for this same request. {outcome} "
+            "Check the current screen: if the task is done, reply to the owner; otherwise carry on from here."
+        )
+        messages.append({"role": "user", "content": f"{note}\n\n{screen}"})
+        if image:  # separate, like other screenshots, so dropping it later keeps the note and screen list
+            messages.append({"role": "user", "content": [{"type": "text", "text": "Current screen:"}, {"type": "image_url", "image_url": {"url": image}}]})
+        return done
 
     def execute(self, call: dict[str, Any], model: Model) -> tuple[str, str | None]:
         name = call["function"]["name"]

@@ -161,20 +161,28 @@ class Shortcuts:
                 best, best_score = item, score
         return best if best_score >= SHORTCUT_MATCH else None
 
-    def save(self, task: str, steps: list[str]) -> None:
-        """Keep one shortcut per request; a shorter route for the same request replaces the old one."""
+    @staticmethod
+    def same_request(item: dict[str, Any], task: str) -> bool:
+        """Exactly the same keywords: only then is a saved route safe to replay without the AI, since
+        "record 10 seconds" must not replay "record 5 seconds"."""
+        return keywords(item["task"]) == keywords(task)
+
+    def save(self, task: str, steps: list[str], calls: list[dict[str, Any]]) -> None:
+        """Keep one shortcut per request; a shorter route for the same request replaces the old one.
+        steps describe the route for the AI; calls are the same steps as tool calls, for replaying."""
         words = keywords(task)
         if len(words) < MIN_SHORTCUT_KEYWORDS:
             return
+        saved = datetime.now().isoformat(timespec="minutes")
         with self.store.lock:
             items = self.store.load()
             for item in items:
                 if keywords(item["task"]) == words:
-                    if len(steps) <= len(item["steps"]):
-                        item.update(task=task, steps=steps, saved=datetime.now().isoformat(timespec="minutes"))
+                    if len(steps) <= len(item["steps"]) or not item.get("calls"):  # older saves can't replay
+                        item.update(task=task, steps=steps, calls=calls, saved=saved)
                         self.store.save(items)
                     return
-            item = {"id": next_id(items), "task": task, "steps": steps, "saved": datetime.now().isoformat(timespec="minutes")}
+            item = {"id": next_id(items), "task": task, "steps": steps, "calls": calls, "saved": saved}
             self.store.save((items + [item])[-MAX_SHORTCUTS:])
 
     def remove(self, item_id: int) -> bool:
