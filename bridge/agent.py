@@ -30,6 +30,10 @@ DAILY_RECHECK_S = 3600
 MAX_TROUBLE_WAIT_S = 900  # server errors and network failures back off 1, 2, 4... minutes, up to this
 TROUBLE_STALE_S = 900  # a problem not seen again for this long counts as over
 PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq"}
+# When a provider is overloaded, a model may still answer but take minutes (seen: 123 s for one step).
+MODEL_TIMEOUT_S = 40  # give up and try the next model; healthy answers take under ~15 s
+SLOW_ANSWER_S = 25  # an answer slower than this sets the model aside for a while
+SLOW_COOLDOWN_S = 300
 PACIFIC = ZoneInfo("America/Los_Angeles")
 WORKSPACE_DIR = "/home/agent/agent"
 MAX_STEPS = 40
@@ -368,6 +372,7 @@ class Model:
     strikes: int = 0
     out_of_quota: bool = False  # the last refusal was for the daily quota
     reported: tuple[int, int] | None = None  # (daily limit, left) as the provider last reported them
+    latency: float = 0.0  # seconds the last request took
 
     @property
     def label(self) -> str:
@@ -465,10 +470,19 @@ class Router:
                 self.penalize(model, error.status, error.detail, retry_after(error.headers, error.detail))
                 failed = True
                 continue
-            except (OSError, TimeoutError, ValueError) as error:
+            except TimeoutError as error:
+                self.penalize(model, 504, f"no answer within {MODEL_TIMEOUT_S}s: {error}", None)
+                failed = True
+                continue
+            except (OSError, ValueError) as error:
                 self.penalize(model, 0, str(error), None)
                 failed = True
                 continue
+            if model.latency > SLOW_ANSWER_S:  # keep this answer, but send the next steps elsewhere
+                model.cooldown_until = time.time() + SLOW_COOLDOWN_S
+                self.last_failure = f"{model.short} slow at {PROVIDER_NAMES.get(model.family, model.family)}"
+                log.warning(f"{model.label} took {model.latency:.0f}s; setting it aside for {SLOW_COOLDOWN_S}s")
+                return self.succeeded(model, message, True, skipped, fast_first)
             return self.succeeded(model, message, failed, skipped, fast_first)
         raise NoModelAvailable("All models are rate-limited or failing right now. Try again later.")
 
@@ -505,8 +519,11 @@ class Router:
         }
         _, path = ENDPOINTS[model.family]
         start = time.time()
-        status, response_headers, data = self.pools[model.family].request(path, json.dumps(body).encode(), headers, 120)
-        log.info(f"{model.label}: HTTP {status} in {time.time() - start:.1f}s")
+        status, response_headers, data = self.pools[model.family].request(
+            path, json.dumps(body).encode(), headers, MODEL_TIMEOUT_S
+        )
+        model.latency = time.time() - start
+        log.info(f"{model.label}: HTTP {status} in {model.latency:.1f}s")
         model.reported = reported_quota(response_headers) or model.reported
         if self.usage and status in (200, 429):
             self.usage.record(model.label, ok=status == 200)
@@ -537,6 +554,8 @@ class Router:
                 self.last_failure = f"can't reach {provider}"
             elif code == 503:
                 self.last_failure = f"{model.short} busy at {provider}"
+            elif code == 504:
+                self.last_failure = f"{model.short} too slow at {provider}"
             else:
                 self.last_failure = f"{model.short}: server error at {provider}"
             first, _ = self.trouble.get(model.label, (time.time(), 0.0))

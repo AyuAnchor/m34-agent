@@ -72,9 +72,9 @@ class ConnectionPool:
                 conn.request("POST", path, body, headers)
                 response = conn.getresponse()
                 data = response.read()
-            except (http.client.HTTPException, OSError):
+            except (http.client.HTTPException, OSError) as error:
                 conn.close()
-                if attempt == 2:
+                if attempt == 2 or isinstance(error, TimeoutError):  # a slow server isn't a stale connection
                     raise
                 continue
             with self.lock:
