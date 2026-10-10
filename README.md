@@ -516,6 +516,10 @@ Examples: *"record a 10 second video from the front camera and send it"*,
 Tasks that use the phone show one live **progress message** that updates with every step. It
 appears with the first action, so plain chat ("hi") just gets the reply, about 0.4 s sooner.
 
+Text replies **stream** as the AI writes them: the bridge asks the models for a streamed answer and
+shows it growing in the chat (Telegram's `sendMessageDraft`, redrawn at most every 0.6 s), then
+sends the finished reply as a normal message. Text a model writes before an action is cleared.
+
 ### Logs
 
 ```sh

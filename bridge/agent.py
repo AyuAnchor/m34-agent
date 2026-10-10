@@ -412,6 +412,54 @@ class ProviderError(Exception):
         self.status, self.headers, self.detail = status, headers, detail
 
 
+class StreamedReply:
+    """Rebuilds a chat message from a streamed (server-sent events) answer, passing the text to on_text as
+    it grows until a tool call shows up (text before a call is a remark, not the reply)."""
+
+    def __init__(self, on_text: Callable[[str], None]) -> None:
+        self.on_text = on_text
+        self.content = ""
+        self.calls: list[dict[str, Any]] = []
+        self.deadline = time.time() + MODEL_TIMEOUT_S
+
+    def feed(self, line: bytes) -> None:
+        if time.time() > self.deadline:  # the socket timeout only covers the wait for each piece
+            raise TimeoutError("answer still streaming")
+        line = line.strip()
+        if not line.startswith(b"data:") or line == b"data: [DONE]":
+            return
+        chunk = json.loads(line[5:])
+        if "error" in chunk:
+            raise ProviderError(502, {}, f"error mid-answer: {json.dumps(chunk)[:300]}")
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            for part in delta.get("tool_calls") or []:
+                self.add_call(part)
+            if text := delta.get("content"):
+                self.content += text
+                if not self.calls:
+                    self.on_text(self.content)
+
+    def add_call(self, part: dict[str, Any]) -> None:
+        """Groq sends a call in pieces tagged with its index; Gemini sends each call whole, untagged."""
+        index = part.get("index", len(self.calls) if "id" in part else max(len(self.calls) - 1, 0))
+        while len(self.calls) <= index:
+            self.calls.append({"type": "function", "function": {"name": "", "arguments": ""}})
+        call = self.calls[index]
+        for key, value in part.items():
+            if key == "function":
+                for field in ("name", "arguments"):
+                    call["function"][field] += value.get(field) or ""
+            elif key != "index":
+                call[key] = value
+
+    def message(self) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant", "content": self.content or None}
+        if self.calls:
+            message["tool_calls"] = self.calls
+        return message
+
+
 class Router:
     """Sends each request to the best model that isn't cooling down after a limit or error."""
 
@@ -446,9 +494,15 @@ class Router:
         paused = {m.label: {"until": m.cooldown_until, "full": m.out_of_quota} for m in self.models if m.cooldown_until > now}
         write_atomically(COOLDOWNS_PATH, json.dumps(paused))
 
-    def complete(self, messages: list[dict[str, Any]], fast_first: bool = False) -> tuple[dict[str, Any], Model]:
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        fast_first: bool = False,
+        on_text: Callable[[str], None] | None = None,
+    ) -> tuple[dict[str, Any], Model]:
         """Ask the best available model. fast_first tries the quickest models first (a task's first step:
-        plain chat ends there); later steps go to the smartest."""
+        plain chat ends there); later steps go to the smartest. on_text receives a text answer as it's
+        written."""
         order = sorted(self.models, key=lambda m: (m.fast == 0, m.fast)) if fast_first else self.models
         failed = skipped = False
         for model in order:
@@ -456,13 +510,13 @@ class Router:
                 skipped = True
                 continue
             try:
-                message = self.call(model, messages)
+                message = self.call(model, messages, on_text)
             except ProviderError as error:
                 if error.status == 400 and model.effort:  # this model doesn't take the thinking setting
                     log.warning(f"{model.label} rejected reasoning_effort={model.effort}; sending without it")
                     model.effort = None
                     try:
-                        message = self.call(model, messages)
+                        message = self.call(model, messages, on_text)
                     except ProviderError as retry_error:
                         error = retry_error
                     else:
@@ -508,8 +562,13 @@ class Router:
         ongoing = [first for first, last in self.trouble.values() if now - last < TROUBLE_STALE_S]
         return min(ongoing) if ongoing else None
 
-    def call(self, model: Model, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def call(
+        self, model: Model, messages: list[dict[str, Any]], on_text: Callable[[str], None] | None = None
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {"model": model.name, "messages": prepare(model, messages), "tools": TOOLS}
+        streamed = StreamedReply(on_text) if on_text else None
+        if streamed:
+            body["stream"] = True
         if model.effort:
             body["reasoning_effort"] = model.effort
         headers = {
@@ -520,7 +579,7 @@ class Router:
         _, path = ENDPOINTS[model.family]
         start = time.time()
         status, response_headers, data = self.pools[model.family].request(
-            path, json.dumps(body).encode(), headers, MODEL_TIMEOUT_S
+            path, json.dumps(body).encode(), headers, MODEL_TIMEOUT_S, streamed.feed if streamed else None
         )
         model.latency = time.time() - start
         log.info(f"{model.label}: HTTP {status} in {model.latency:.1f}s")
@@ -529,6 +588,11 @@ class Router:
             self.usage.record(model.label, ok=status == 200)
         if status != 200:
             raise ProviderError(status, response_headers, data.decode(errors="replace"))
+        if streamed:
+            message = streamed.message()
+            if not message["content"] and not message.get("tool_calls"):
+                raise ProviderError(502, response_headers, "empty streamed answer")
+            return message
         choices = json.loads(data).get("choices") or []
         if not choices or "message" not in choices[0]:  # e.g. a filtered reply: treat like a server hiccup
             raise ProviderError(502, response_headers, f"no answer in response: {data[:300]!r}")
@@ -666,6 +730,7 @@ class Agent:
         notify: Callable[[str], None],
         on_step: Callable[[], None],
         on_action: Callable[[str, str], None],
+        on_text: Callable[[str], None],
         cancelled: Callable[[], bool],
     ) -> None:
         self.router = router
@@ -681,6 +746,7 @@ class Agent:
         self.notify = notify
         self.on_step = on_step
         self.on_action = on_action
+        self.on_text = on_text
         self.cancelled = cancelled
         self.model_name = getprop("ro.product.model") or "Android"
         self.handlers: dict[str, Callable[[dict[str, Any], Model], str | tuple[str, str | None]]] = {
@@ -798,11 +864,11 @@ class Agent:
                 return "Stopped."
             self.on_step()
             try:
-                message, model = self.router.complete(messages, fast_first=step == 0)
+                message, model = self.router.complete(messages, fast_first=step == 0, on_text=self.on_text)
                 if step == 0 and model.fast and is_refusal(message):
                     # Quick models refuse some things the main models handle within the rules; let those decide.
                     log.info(f"{model.label} refused; asking the main models instead")
-                    message, model = self.router.complete(messages)
+                    message, model = self.router.complete(messages, on_text=self.on_text)
             except NoModelAvailable as error:
                 return str(error)
             messages.append(message)

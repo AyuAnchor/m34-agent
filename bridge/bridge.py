@@ -33,6 +33,7 @@ PROGRESS_LINES = 8
 OFFLINE_REPORT_S = 10 * 60  # while Telegram is unreachable, log a reminder this often, not every retry
 OUTAGE_NOTICE_S = 10 * 60  # tell the owner once when the main models have been failing this long
 PROGRESS_EDIT_S = 2.0
+DRAFT_EVERY_S = 0.6  # how often a reply being written is redrawn; each redraw is one API call
 SCHEDULER_TICK_S = 20
 WARM_EVERY_S = 120  # keep a fresh connection to Telegram and each AI provider ready
 ADB_GRACE_S = 6 * 60  # after a reboot, adb on 5555 normally returns within ~3 minutes
@@ -124,6 +125,44 @@ class Telegram:
         self.post(method, body, f"multipart/form-data; boundary={boundary}", 300)
 
 
+class Draft:
+    """A reply shown while the AI writes it (Telegram's sendMessageDraft). Its own thread sends only the
+    newest text, so the model's stream never waits on Telegram."""
+
+    def __init__(self, tg: Telegram, chat_id: int) -> None:
+        self.tg, self.chat_id = tg, chat_id
+        self.draft_id = secrets.randbelow(2**31 - 1) + 1
+        self.text = self.shown = ""
+        self.changed = threading.Event()
+        self.closed = threading.Event()
+        self.thread = threading.Thread(target=self.send_latest, daemon=True)
+        self.thread.start()
+
+    def update(self, text: str) -> None:
+        self.text = text[:MAX_MESSAGE]
+        self.changed.set()
+
+    def close(self) -> None:
+        """Called before the real reply goes out, so a late redraw can't land after it."""
+        self.closed.set()
+        self.changed.set()
+        self.thread.join(timeout=10)
+
+    def send_latest(self) -> None:
+        while self.changed.wait() and not self.closed.is_set():
+            self.changed.clear()
+            text = self.text
+            if text == self.shown:
+                continue
+            try:
+                self.tg.call("sendMessageDraft", http_timeout=10, chat_id=self.chat_id, draft_id=self.draft_id, text=text)
+                self.shown = text
+            except Exception as error:
+                log.debug(f"draft update skipped: {error}")
+            if self.closed.wait(DRAFT_EVERY_S):
+                return
+
+
 class Bridge:
     def __init__(self) -> None:
         self.config = load_json(CONFIG_PATH, {})
@@ -142,6 +181,7 @@ class Bridge:
         self.progress_id: int | None = None  # set and cleared only by the progress sender thread
         self.last_edit = 0.0
         self.progress_jobs: queue.Queue[Callable[[], None]] = queue.Queue()
+        self.draft: Draft | None = None  # the reply being written, during a task
         self.device = Device()
         self.quick = QuickCommands(self.device)
         self.device_lock = threading.Lock()  # one user of the screen at a time: a task, a quick command or a watch
@@ -165,6 +205,7 @@ class Bridge:
             notify=self.notify,
             on_step=self.show_typing,
             on_action=self.on_action,
+            on_text=self.show_draft,
             cancelled=self.cancel.is_set,
         )
 
@@ -397,7 +438,12 @@ class Bridge:
 
         self.progress_jobs.put(post)
 
+    def show_draft(self, text: str) -> None:
+        if self.draft:
+            self.draft.update(text)
+
     def on_action(self, model: str, action: str) -> None:
+        self.show_draft("")  # any text shown so far was a remark before this action, not the reply
         self.model = model
         self.actions.append(action)
         if len(self.actions) == 1:
@@ -529,9 +575,11 @@ class Bridge:
             self.cancel.clear()
             self.task, self.started, self.actions, self.model = task, time.time(), [], ""
             log.info(f"task: {task[:200]} (reached the bot ~{self.started - sent_at:.0f}s after sending)")
+            self.draft = Draft(self.tg, self.owner)
             try:
                 history = load_json(HISTORY_PATH, [])
                 reply = self.agent.run(history, task)
+                self.draft.close()
                 history += [{"role": "user", "content": task}, {"role": "assistant", "content": reply}]
                 save_json(HISTORY_PATH, history[-MAX_HISTORY:])
                 self.tg.send(self.owner, reply)
@@ -540,6 +588,8 @@ class Bridge:
                 log.exception("task failed")
                 self.notify(f"Task failed: {error}")
             finally:
+                self.draft.close()
+                self.draft = None
                 self.update_progress("Stopped" if self.cancel.is_set() else "Finished")
                 self.progress_jobs.put(lambda: setattr(self, "progress_id", None))  # after the final edit
                 self.busy = False

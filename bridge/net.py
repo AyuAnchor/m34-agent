@@ -3,7 +3,7 @@ import http.client
 import socket
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 DNS_CACHE_S = 300
 _getaddrinfo = socket.getaddrinfo
@@ -64,17 +64,34 @@ class ConnectionPool:
         with self.lock:
             self.idle.append(conn)
 
-    def request(self, path: str, body: bytes, headers: dict[str, str], timeout: float) -> tuple[int, Any, bytes]:
-        """POST and return (status, headers, body). Retries once if a kept-alive connection went stale."""
+    def request(
+        self,
+        path: str,
+        body: bytes,
+        headers: dict[str, str],
+        timeout: float,
+        on_line: Callable[[bytes], None] | None = None,
+    ) -> tuple[int, Any, bytes]:
+        """POST and return (status, headers, body). Retries once if a kept-alive connection went stale.
+        With on_line, a successful response is handed over line by line as it arrives (body is then b"")."""
         for attempt in (1, 2):
             conn = self.acquire(timeout)
+            streamed = False
             try:
                 conn.request("POST", path, body, headers)
                 response = conn.getresponse()
-                data = response.read()
-            except (http.client.HTTPException, OSError) as error:
+                if on_line and response.status == 200:
+                    for line in response:
+                        streamed = True
+                        on_line(line)
+                    data = b""
+                else:
+                    data = response.read()
+            except Exception as error:
                 conn.close()
-                if attempt == 2 or isinstance(error, TimeoutError):  # a slow server isn't a stale connection
+                # A slow server isn't a stale connection, and a half-delivered answer can't be resent.
+                stale = isinstance(error, (http.client.HTTPException, OSError)) and not isinstance(error, TimeoutError)
+                if attempt == 2 or not stale or streamed:
                     raise
                 continue
             with self.lock:
