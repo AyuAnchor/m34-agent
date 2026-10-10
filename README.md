@@ -520,6 +520,14 @@ Text replies **stream** as the AI writes them: the bridge asks the models for a 
 shows it growing in the chat (Telegram's `sendMessageDraft`, redrawn at most every 0.6 s), then
 sends the finished reply as a normal message. Text a model writes before an action is cleared.
 
+Replies are formatted: the AI's Markdown is rendered as Telegram HTML (bold, italics, `code`,
+links, bullet points), tables and code blocks become aligned monospace blocks, and headings become
+bold. If Telegram rejects the formatting the reply is resent as plain text.
+
+The AI is given the phone's fixed specs (model, Android and One UI version, chipset, total RAM and
+storage, screen size) in its prompt, so it answers questions about the phone from fact instead of
+guessing. Live values (free space, battery) are still read with phone_status.
+
 ### Logs
 
 ```sh

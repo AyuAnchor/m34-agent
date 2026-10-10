@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from device import MAX_AUDIO_S, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, getprop, is_temporary, phone_line_problem, ready_to_send
+from device import MAX_AUDIO_S, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, is_temporary, phone_line_problem, ready_to_send
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -91,8 +91,12 @@ LOCKOUT = re.compile(
     re.IGNORECASE,
 )
 
-SYSTEM_PROMPT = """You control an Android phone ({model}, screen {width}x{height}) for its owner, who \
-messages you on Telegram. The touchscreen is broken, so you act only through your tools.
+SYSTEM_PROMPT = """You control an Android phone for its owner, who messages you on Telegram. The \
+touchscreen is broken, so you act only through your tools.
+
+This phone (fixed facts, use them and never contradict them with guesses): {specs}.
+These cover the model, OS, chipset, total RAM and storage; for anything live (free space, battery, \
+settings) read it with a tool.
 
 Using the phone:
 - If the message is just conversation (a greeting, or a general-knowledge question), reply directly \
@@ -769,7 +773,6 @@ class Agent:
         self.on_action = on_action
         self.on_text = on_text
         self.cancelled = cancelled
-        self.model_name = getprop("ro.product.model") or "Android"
         self.handlers: dict[str, Callable[[dict[str, Any], Model], str | tuple[str, str | None]]] = {
             "look": lambda a, m: self.device.look(with_image=m.vision),
             "tap": lambda a, m: self.device.tap(
@@ -837,9 +840,7 @@ class Agent:
 
     def system_prompt(self) -> str:
         return SYSTEM_PROMPT.format(
-            model=self.model_name,
-            width=self.device.width,
-            height=self.device.height,
+            specs=self.device.specs(),
             now=self.schedules.now().strftime("%A %d %B %Y, %H:%M"),
             timezone=self.schedules.tz.key,
             memory=self.memory.listing() or "(nothing yet)",

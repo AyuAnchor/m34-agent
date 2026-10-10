@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent import Agent, Router
-from commands import QuickCommands, parse_duration, plain
+from commands import QuickCommands, format_telegram, parse_duration, plain
 from device import Device, adb, getprop, is_temporary, ready_to_send
 from net import ConnectionPool
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -82,6 +82,40 @@ def save_json(path: Path, data: Any) -> None:
     write_atomically(path, json.dumps(data, indent=2))
 
 
+def split_message(text: str, limit: int) -> list[str]:
+    """Split a message to fit Telegram's size cap, breaking at line boundaries and never inside a
+    <pre> block (which would break the HTML). Over-long single blocks are hard-split as a last resort."""
+    if len(text) <= limit:
+        return [text]
+    blocks, buffer, inside = [], [], False
+    for line in text.split("\n"):
+        buffer.append(line)
+        inside = (inside or "<pre>" in line) and "</pre>" not in line
+        if not inside:
+            blocks.append("\n".join(buffer))
+            buffer = []
+    if buffer:
+        blocks.append("\n".join(buffer))
+    chunks: list[str] = []
+    current = ""
+    for block in blocks:
+        if len(block) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks += [block[i:i + limit] for i in range(0, len(block), limit)]
+        elif not current:
+            current = block
+        elif len(current) + 1 + len(block) <= limit:
+            current += "\n" + block
+        else:
+            chunks.append(current)
+            current = block
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 class Telegram:
     """Bot API client over a shared pool of open connections."""
 
@@ -100,9 +134,8 @@ class Telegram:
         return self.post(method, json.dumps(params).encode(), "application/json", http_timeout)
 
     def send(self, chat_id: int, text: str, **extra: Any) -> None:
-        text = text or "(empty reply)"
-        for start in range(0, len(text), MAX_MESSAGE):
-            self.call("sendMessage", chat_id=chat_id, text=text[start:start + MAX_MESSAGE], **extra)
+        for chunk in split_message(text or "(empty reply)", MAX_MESSAGE):
+            self.call("sendMessage", chat_id=chat_id, text=chunk, **extra)
 
     def send_file(self, chat_id: int, path: Path, caption: str) -> None:
         """Upload a photo, video or any other file (as a document)."""
@@ -208,6 +241,15 @@ class Bridge:
             on_text=self.show_draft,
             cancelled=self.cancel.is_set,
         )
+
+    def send_reply(self, text: str) -> None:
+        """Send an AI reply with Markdown rendered as Telegram HTML, falling back to plain text if
+        Telegram rejects the formatting."""
+        try:
+            self.tg.send(self.owner, format_telegram(text), parse_mode="HTML")
+        except Exception as error:
+            log.warning(f"formatted reply rejected, sending plain: {error}")
+            self.tg.send(self.owner, text)
 
     def notify(self, text: str) -> bool:
         """Best effort, returns whether it was delivered: background loops call this, and a failed send
@@ -582,7 +624,7 @@ class Bridge:
                 self.draft.close()
                 history += [{"role": "user", "content": task}, {"role": "assistant", "content": reply}]
                 save_json(HISTORY_PATH, history[-MAX_HISTORY:])
-                self.tg.send(self.owner, reply)
+                self.send_reply(reply)
                 log.info(f"replied {time.time() - self.started:.1f}s after starting, {len(self.actions)} actions")
             except Exception as error:
                 log.exception("task failed")

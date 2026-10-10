@@ -49,6 +49,13 @@ TERMUX_BIN = "/data/data/com.termux/files/usr/bin"
 MIC_RECORDER = f"{TERMUX_BIN}/termux-microphone-record"
 AUDIO_DIR = Path("/data/data/com.termux/files/home/.agent-audio")
 VOLUME_STREAMS = {"media": 3, "ring": 2, "alarm": 4, "notification": 5}
+SOC_NAMES = {"s5e8825": "Samsung Exynos 1280"}  # getprop reports the internal code, not the marketing name
+
+
+def gib(kb: str) -> str:
+    return f"{int(kb) / 1024 / 1024:.1f} GB" if kb.isdigit() else "?"
+
+
 DUMPSYS_STREAMS = {"media": "MUSIC", "ring": "RING", "alarm": "ALARM", "notification": "NOTIFICATION"}
 STATUS_SCRIPT = (
     "dumpsys audio | grep -E '^- STREAM_(MUSIC|RING|ALARM|NOTIFICATION):|^   (Max|streamVolume):';"
@@ -275,8 +282,27 @@ class Device:
         self.elements: list[Element] = []
         self.automator = None
         self.apps: dict[str, str] = {}  # package -> its launcher component
+        self._specs = ""
         match = re.search(r"(\d+)x(\d+)", shell("wm size"))
         self.width, self.height = (int(match[1]), int(match[2])) if match else (1080, 2340)
+
+    def specs(self) -> str:
+        """This phone's fixed facts (model, OS, chipset, total RAM and storage), read once and cached.
+        Putting them in the prompt stops the AI inventing wrong specs for its own phone."""
+        if not self._specs:
+            out = shell(
+                "getprop ro.product.model; getprop ro.build.version.release; getprop ro.build.version.oneui;"
+                "getprop ro.soc.manufacturer; getprop ro.soc.model;"
+                "awk '/MemTotal/{print $2}' /proc/meminfo; df /data | awk 'NR==2{print $2}'"
+            ).splitlines()
+            model, android, oneui, soc_mfr, soc, mem_kb, disk_kb = (out + [""] * 7)[:7]
+            chip = SOC_NAMES.get(soc, f"{soc_mfr} {soc}".strip() or "unknown")
+            one_ui = f", One UI {int(oneui) // 10000}.{int(oneui) // 100 % 100}" if oneui.isdigit() else ""
+            self._specs = (
+                f"{model or '?'}, Android {android or '?'}{one_ui}, {chip}, "
+                f"{gib(mem_kb)} RAM, {gib(disk_kb)} storage, {self.width}x{self.height} screen"
+            )
+        return self._specs
 
     def fast(self):
         """The uiautomator2 connection, or None if unavailable. Reconnects lazily after a failure."""
@@ -720,9 +746,6 @@ class Device:
 
         def on(key: str) -> str:
             return "on" if values.get(key) == "1" else "off"
-
-        def gib(kb: str) -> str:
-            return f"{int(kb) / 1024 / 1024:.1f} GB" if kb.isdigit() else "?"
 
         storage = values.get("storage", "").split()  # total, used, available (1K blocks)
         storage_line = (

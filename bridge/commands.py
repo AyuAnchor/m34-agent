@@ -17,6 +17,85 @@ def plain(text: str) -> str:
     return AI_HINT.sub("", text).strip()
 
 
+TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+HEADER = re.compile(r"^\s*(#{1,6})\s+(.*)$")
+BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+
+
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _inline(text: str) -> str:
+    """Markdown emphasis in one already-escaped line to Telegram HTML."""
+    codes: list[str] = []
+
+    def stash(match: re.Match) -> str:
+        codes.append(f"<code>{match.group(1)}</code>")
+        return f"\x00{len(codes) - 1}\x00"
+
+    text = re.sub(r"`([^`]+)`", stash, text)
+    text = LINK.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+    text = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", text)
+    return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], text)
+
+
+def _table(header: list[str], body: list[list[str]]) -> str:
+    """A markdown pipe table as an aligned monospace block (Telegram has no table markup)."""
+    rows = [[re.sub(r"[*_`]", "", cell) for cell in row] for row in [header, *body]]
+    columns = max(len(row) for row in rows)
+    rows = [row + [""] * (columns - len(row)) for row in rows]
+    widths = [max(len(row[c]) for row in rows) for c in range(columns)]
+    line = lambda row: " | ".join(row[c].ljust(widths[c]) for c in range(columns))
+    separator = "-+-".join("-" * widths[c] for c in range(columns))
+    body_lines = "\n".join(line(row) for row in rows[1:])
+    return "<pre>" + _escape(f"{line(rows[0])}\n{separator}\n{body_lines}") + "</pre>"
+
+
+def _cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def format_telegram(md: str) -> str:
+    """Render the AI's Markdown as Telegram HTML: bold, italic, code, links, bullets, and tables and
+    code blocks as monospace. Telegram has no headers or tables, so headers become bold and tables
+    aligned <pre> blocks."""
+    lines = md.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("```"):
+            block = []
+            i += 1
+            while i < len(lines) and not lines[i].lstrip().startswith("```"):
+                block.append(lines[i])
+                i += 1
+            i += 1
+            out.append("<pre>" + _escape("\n".join(block)) + "</pre>")
+        elif "|" in line and i + 1 < len(lines) and "|" in lines[i + 1] and TABLE_SEP.match(lines[i + 1]):
+            header = _cells(line)
+            i += 2
+            body = []
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                body.append(_cells(lines[i]))
+                i += 1
+            out.append(_table(header, body))
+        elif header := HEADER.match(line):
+            out.append("<b>" + _inline(_escape(header.group(2).strip())) + "</b>")
+            i += 1
+        elif bullet := BULLET.match(line):
+            out.append(f"{bullet.group(1)}• " + _inline(_escape(bullet.group(2))))
+            i += 1
+        else:
+            out.append(_inline(_escape(line)))
+            i += 1
+    return "\n".join(out)
+
+
 @dataclass
 class Reply:
     text: str = ""
