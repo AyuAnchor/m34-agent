@@ -73,9 +73,16 @@ OPENAI_KEYS = {"role", "content", "tool_calls", "tool_call_id", "name"}
 AUTO_PHONE = re.compile(
     r"^shell (input (tap|swipe|text|keyevent) .+"
     r"|monkey -p [\w.]+ -c android\.intent\.category\.LAUNCHER 1"
-    r"|pm list packages( -3)?( [\w.]+)?|dumpsys battery|getprop( [\w.]+)?|wm size|ls( -\w+)? /sdcard/[\w./-]*)$"
+    r"|pm list packages( -3)?( [\w.]+)?|dumpsys [\w.]+|getprop( [\w.]+)?|wm size"
+    r"|settings get (system|global|secure) [\w.]+|ls( -\w+)? /sdcard/[\w./-]*)$"
 )
 SHELL_METACHARS = re.compile(r"[;&|`$<>\\\n()]")
+# Shell commands that only read; run without owner approval (no metachars, so a single plain command).
+READ_ONLY_CMDS = frozenset(
+    "ls cat head tail df du free pwd wc grep egrep fgrep stat file find uname whoami date uptime ps "
+    "env printenv which type hostname id tree realpath readlink dirname basename uniq cut".split()
+)
+DESTRUCTIVE_FLAGS = re.compile(r"(?<!\S)-(?:delete|exec\w*)(?!\S)")  # find's write flags
 # Actions that would cut off remote access. Blocked outright, even with owner approval.
 LOCKOUT = re.compile(
     r"\btcpip\b|\badb_wifi|\badb_enabled|\breboot\b|\bshutdown\b|svc (wifi|data|usb)|airplane_mode"
@@ -88,8 +95,11 @@ SYSTEM_PROMPT = """You control an Android phone ({model}, screen {width}x{height
 messages you on Telegram. The touchscreen is broken, so you act only through your tools.
 
 Using the phone:
-- If the message is just conversation (a greeting, or a question you can answer), reply directly \
-without using tools. Never guess the phone's state (settings, screen, files): check it with a tool.
+- If the message is just conversation (a greeting, or a general-knowledge question), reply directly \
+without using tools. But anything specific to THIS phone (its settings, screen, files, storage, \
+memory, battery, hardware or chipset) must be read with a tool, never answered from memory: you do \
+not know this phone's specs, so guessing them gives false answers. Use phone_status for storage, \
+memory, battery and chipset in one call; getprop for other hardware details.
 - Call look before your first action. After tap, type_text, scroll, key, open_app, open_settings and open_url you \
 automatically get the new screen, so don't call look again after them. Tap by element number from \
 the latest screen; numbers change after every action.
@@ -329,6 +339,17 @@ def as_float(value: Any) -> float | None:
 
 def as_bool(value: Any) -> bool:
     return value is True or str(value).lower() in ("true", "1", "yes")
+
+
+def read_only_shell(command: str) -> bool:
+    """A single plain command that only reads: safe to run without owner approval."""
+    if SHELL_METACHARS.search(command) or DESTRUCTIVE_FLAGS.search(command):
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(argv) and argv[0] in READ_ONLY_CMDS
 
 
 def seconds_until_quota_reset() -> float:
@@ -1014,7 +1035,8 @@ class Agent:
             argv = shlex.split(args)
         except ValueError as error:
             return f"Could not parse arguments: {error}"
-        routine = AUTO_PHONE.match(args) and not SHELL_METACHARS.search(args)
+        body = args[6:] if args.startswith("shell ") else ""
+        routine = (AUTO_PHONE.match(args) or read_only_shell(body)) and not SHELL_METACHARS.search(args)
         if not routine and not self.ask_owner(f"phone {args}"):
             return "The owner denied this action."
         result = adb(*argv)
@@ -1024,7 +1046,7 @@ class Agent:
     def shell(self, command: str) -> str:
         if LOCKOUT.search(command):
             return "Blocked: this could cut off remote access to the phone."
-        if not self.ask_owner(f"shell: {command}"):
+        if not read_only_shell(command) and not self.ask_owner(f"shell: {command}"):
             return "The owner denied this action."
         result = subprocess.run(
             ["bash", "-lc", command], cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=300

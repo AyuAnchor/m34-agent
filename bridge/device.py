@@ -62,7 +62,11 @@ STATUS_SCRIPT = (
     "echo rotate=$(settings get system accelerometer_rotation);"
     "echo night=$(cmd uimode night);"
     "cmd wifi status | grep -m1 'connected to';"
-    "dumpsys battery | grep -E '^  (level|status):'"
+    "dumpsys battery | grep -E '^  (level|status):';"
+    "echo storage=$(df /data | awk 'NR==2{print $2,$3,$4}');"
+    "echo ram=$(awk '/MemTotal|MemAvailable/{print $2}' /proc/meminfo | paste -sd' ');"
+    "echo soc=$(getprop ro.soc.manufacturer) $(getprop ro.soc.model);"
+    "echo chip=$(getprop ro.board.platform)"
 )
 TOGGLES = {  # setting -> (command to turn it on, command to turn it off)
     "auto_rotate": ("settings put system accelerometer_rotation 1", "settings put system accelerometer_rotation 0"),
@@ -717,6 +721,19 @@ class Device:
         def on(key: str) -> str:
             return "on" if values.get(key) == "1" else "off"
 
+        def gib(kb: str) -> str:
+            return f"{int(kb) / 1024 / 1024:.1f} GB" if kb.isdigit() else "?"
+
+        storage = values.get("storage", "").split()  # total, used, available (1K blocks)
+        storage_line = (
+            f"Storage: {gib(storage[1])} used of {gib(storage[0])}, {gib(storage[2])} free"
+            if len(storage) == 3 else "Storage: unknown"
+        )
+        ram = values.get("ram", "").split()  # total, available (kB)
+        ram_line = f"RAM: {gib(ram[0])} total, {gib(ram[1])} free" if len(ram) == 2 else "RAM: unknown"
+        soc = " ".join(part for part in values.get("soc", "").split() if part not in ("", "unknown"))
+        chip_line = f"Chipset: {soc or values.get('chip') or 'unknown'}"
+
         return "\n".join([
             f"Volume: {', '.join(volumes) or 'unknown'}; ringer {values.get('ringer', '?').lower()}",
             f"Brightness: {round(100 * int(brightness) / 255) if brightness.isdigit() else '?'}%"
@@ -727,6 +744,9 @@ class Device:
             f"Airplane mode: {on('airplane')}; Bluetooth: {on('bluetooth')}; "
             f"Do not disturb: {'off' if values.get('zen') in ('0', None) else 'on'}",
             f"Battery: {f'{level[1]}%, ' + ('charging' if charging else 'not charging') if level else 'unknown'}",
+            storage_line,
+            ram_line,
+            chip_line,
         ])
 
     def toggle(self, setting: str, on: bool) -> str:

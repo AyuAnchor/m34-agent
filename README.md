@@ -73,7 +73,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `set_alarm`, `set_timer` | Direct to the clock app (needs a clock app installed) |
 | `open_url`, `set_volume`, `set_brightness` | Direct actions, no tapping through settings |
 | `open_settings` | Jump straight to a Settings page (display, sound, battery, apps, one app's info page...) instead of tapping through menus |
-| `phone_status` | Volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb and battery in one step |
+| `phone_status` | Volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb, battery, storage, RAM and chipset in one step |
 | `speak` | Say something out loud through the phone's speaker |
 | `search_contacts` | Find contacts by name or number |
 | `make_call`, `send_sms`, `send_email` | Always ask you first; calls/SMS need a SIM and airplane mode off |
