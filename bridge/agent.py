@@ -15,7 +15,7 @@ from device import MAX_AUDIO_S, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, ad
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
-from watch import MotionWatch
+from watch import SOUNDS, MotionWatch, SoundWatch
 
 log = logging.getLogger("agent")
 
@@ -58,7 +58,8 @@ TAPPED = re.compile(r"^(?:Tapped|Long-pressed) \[\d+\] (.+?)\.$", re.MULTILINE)
 # Never saved into shortcuts: read-only, and anything sensitive or personal.
 SHORTCUT_SKIP = {
     "look", "phone_status", "list_schedules", "remember", "forget", "schedule_task", "cancel_schedule",
-    "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "stop_watch", "ask_owner",
+    "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "listen", "stop_watch",
+    "ask_owner",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs usually wandered; not worth replaying
 PREVIOUS_FILE = "<the file from the previous step>"
@@ -111,7 +112,7 @@ the latest screen; numbers change after every action.
 (0,0 is top-left, 1000,1000 is bottom-right).
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
-settings status, calls, messages, motion watch). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
+settings status, calls, messages, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
 - For anything from the internet, use web_search and fetch_url (about a second, no screen). Use the \
 phone's browser only when the owner wants it shown on the phone or a site needs tapping.
 - Do exactly what the owner asked. If no tool can do it, say so and ask; never substitute something \
@@ -261,12 +262,19 @@ TOOLS = [
     ),
     function(
         "watch_motion",
-        "Watch for movement with the camera; the owner gets a clip when something moves. Starts in the "
-        "background after this task, so reply right away.",
-        {"seconds": prop("integer", "up to 7200"), "front": prop("boolean")},
+        "Watch with the camera; the owner gets a clip when something moves, or with people=true only when "
+        "someone enters. Runs in the background, so reply right away.",
+        {"seconds": prop("integer", "up to 7200"), "front": prop("boolean"), "people": prop("boolean")},
         ("seconds",),
     ),
-    function("stop_watch", "Stop a running motion watch."),
+    function(
+        "listen",
+        "Listen with the microphone for a sound (e.g. a baby crying); the owner gets a recording when it's "
+        "heard. Runs in the background alongside other tasks, so reply right away.",
+        {"seconds": prop("integer", "up to 43200"), "sound": prop("string", enum=list(SOUNDS))},
+        ("seconds", "sound"),
+    ),
+    function("stop_watch", "Stop the running camera and sound watches."),
     function(
         "web_search",
         "Search the web: titles, links, snippets.",
@@ -749,6 +757,7 @@ class Agent:
         schedules: Schedules,
         shortcuts: Shortcuts,
         watch: MotionWatch,
+        listener: SoundWatch,
         device_lock: threading.Lock,
         ask_owner: Callable[[str], bool],
         send_file: Callable[[Any, str], None],
@@ -764,6 +773,7 @@ class Agent:
         self.schedules = schedules
         self.shortcuts = shortcuts
         self.watch = watch
+        self.listener = listener
         self.device_lock = device_lock
         self.holding = False
         self.ask_owner = ask_owner
@@ -816,8 +826,11 @@ class Agent:
             "wait": lambda a, m: self.wait(as_int(a.get("seconds")) or 1),
             "take_photo": lambda a, m: self.device.take_photo(as_bool(a.get("front"))),
             "record_video": lambda a, m: self.device.record_video(as_int(a.get("seconds")) or 5, as_bool(a.get("front"))),
-            "watch_motion": lambda a, m: self.watch.start(as_int(a.get("seconds")) or 60, as_bool(a.get("front"))),
-            "stop_watch": lambda a, m: self.watch.stop(),
+            "watch_motion": lambda a, m: self.watch.start(
+                as_int(a.get("seconds")) or 60, as_bool(a.get("front")), as_bool(a.get("people"))
+            ),
+            "listen": lambda a, m: self.listener.start(as_int(a.get("seconds")) or 3600, str(a.get("sound", ""))),
+            "stop_watch": lambda a, m: f"{self.watch.stop()} {self.listener.stop()}",
             "web_search": lambda a, m: web.search(str(a.get("query", ""))),
             "fetch_url": lambda a, m: web.fetch_text(str(a.get("url", ""))),
             "ask_owner": lambda a, m: (

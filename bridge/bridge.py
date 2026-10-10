@@ -19,7 +19,7 @@ from device import Device, adb, getprop, is_temporary, ready_to_send
 from net import ConnectionPool
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
 from updater import current_version, self_update
-from watch import MotionWatch
+from watch import SOUNDS, MotionWatch, SoundWatch
 
 HOME = Path.home()
 REPO_DIR = Path(__file__).resolve().parent.parent  # the git checkout the bot runs from
@@ -55,8 +55,10 @@ BUILT_IN_COMMANDS = [  # (command, description) shown in /help and Telegram's co
     ("schedules", "Scheduled tasks (/unschedule N cancels one)"),
     ("shortcuts", "Saved shortcuts (/delshortcut N deletes one)"),
     ("usage", "AI requests today vs the free daily limits"),
-    ("watch", "Message me if anything moves: /watch 10m [front|back]"),
-    ("unwatch", "Stop the motion watch"),
+    ("watch", "Message me if anything moves: /watch 10m [front|back] [people]"),
+    ("unwatch", "Stop the camera watch"),
+    ("listen", f"Message me if I hear a sound: /listen 8h [{'|'.join(SOUNDS)}]"),
+    ("unlisten", "Stop the sound watch"),
     ("new", "Forget the conversation and start fresh"),
     ("stop", "Stop the current task and clear the queue"),
     ("update", "Pull the latest code from GitHub and restart"),
@@ -218,9 +220,9 @@ class Bridge:
         self.device = Device()
         self.quick = QuickCommands(self.device)
         self.device_lock = threading.Lock()  # one user of the screen at a time: a task, a quick command or a watch
-        self.watch = MotionWatch(
-            self.device, self.device_lock, self.notify, lambda path, caption: self.tg.send_file(self.owner, path, caption)
-        )
+        send_file = lambda path, caption: self.tg.send_file(self.owner, path, caption)
+        self.watch = MotionWatch(self.device, self.device_lock, self.notify, send_file)
+        self.listener = SoundWatch(self.device, self.notify, send_file)
         self.memory = Memory()
         self.usage = Usage()
         self.schedules = Schedules(getprop("persist.sys.timezone") or "UTC")
@@ -232,9 +234,10 @@ class Bridge:
             self.schedules,
             self.shortcuts,
             self.watch,
+            self.listener,
             self.device_lock,
             ask_owner=self.ask_owner,
-            send_file=lambda path, caption: self.tg.send_file(self.owner, path, caption),
+            send_file=send_file,
             notify=self.notify,
             on_step=self.show_typing,
             on_action=self.on_action,
@@ -407,6 +410,10 @@ class Bridge:
             self.tg.send(self.owner, self.start_watch(text.partition(" ")[2]))
         elif text == "/unwatch":
             self.tg.send(self.owner, self.watch.stop())
+        elif text.split()[0] == "/listen":
+            self.tg.send(self.owner, self.start_listening(text.partition(" ")[2]))
+        elif text == "/unlisten":
+            self.tg.send(self.owner, self.listener.stop())
         elif text == "/stop":
             self.stop()
         elif text == "/update":
@@ -437,7 +444,7 @@ class Bridge:
 
     def status(self) -> str:
         queued = self.tasks.qsize()
-        watching = f"\nMotion watch: {self.watch.summary}." if self.watch.active else ""
+        watching = "".join(f"\n{w.name.capitalize()}: {w.summary}." for w in (self.watch, self.listener) if w.active)
         if not self.busy:
             return (f"Idle. {queued} queued." if queued else "Idle.") + watching
         last = self.actions[-1] if self.actions else "thinking"
@@ -534,8 +541,8 @@ class Bridge:
 
     def update(self) -> None:
         def run() -> None:
-            if self.busy or self.watch.active:
-                self.tg.send(self.owner, "Busy (a task or motion watch is running). Send /update again when idle.")
+            if self.busy or self.watch.active or self.listener.active:
+                self.tg.send(self.owner, "Busy (a task or watch is running). Send /update again when idle.")
                 return
             try:
                 result = self_update(REPO_DIR)
@@ -556,15 +563,24 @@ class Bridge:
 
     def start_watch(self, args: str) -> str:
         words = args.lower().split()
-        duration = next((w for w in words if w not in ("front", "back", "rear")), "5m")
+        duration = next((w for w in words if w not in ("front", "back", "rear", "people")), "5m")
         seconds = parse_duration(duration, 60)
         if not seconds:
-            return "Usage: /watch 10m [front|back]  (90s, 10m, 1h; a plain number means minutes)"
-        return self.watch.start(seconds, front="front" in words)
+            return "Usage: /watch 10m [front|back] [people]  (90s, 10m, 1h; a plain number means minutes)"
+        return self.watch.start(seconds, front="front" in words, people="people" in words)
+
+    def start_listening(self, args: str) -> str:
+        words = args.lower().split()
+        sound = next((w for w in words if w in SOUNDS), "cry")
+        seconds = parse_duration(next((w for w in words if w not in SOUNDS), "1h"), 60)
+        if not seconds:
+            return f"Usage: /listen 8h [{'|'.join(SOUNDS)}]  (30m, 8h; a plain number means minutes)"
+        return self.listener.start(seconds, sound)
 
     def stop(self) -> None:
-        if self.watch.active:
-            self.watch.stop()
+        for watch in (self.watch, self.listener):
+            if watch.active:
+                watch.stop()
         while not self.tasks.empty():
             self.tasks.get_nowait()
         if self.busy:

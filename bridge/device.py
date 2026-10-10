@@ -11,6 +11,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
@@ -231,6 +232,48 @@ def motion_moments(video: Path) -> list[float]:
     return moments
 
 
+def start_recorder(path: Path, seconds: int, options: list[str]) -> None:
+    """Start a Termux:API microphone recording that stops itself after the given seconds. Takes ~4 s."""
+    AUDIO_DIR.mkdir(exist_ok=True)
+    started = subprocess.run([MIC_RECORDER, "-f", str(path), "-l", str(seconds), *options],
+                             capture_output=True, text=True, timeout=30)
+    if "Recording started" not in started.stdout:
+        raise RuntimeError(f"Could not start recording: {(started.stdout + started.stderr).strip()}")
+
+
+def stop_recorder() -> None:
+    subprocess.run([MIC_RECORDER, "-q"], capture_output=True, timeout=30)
+
+
+def wait_for_m4a(path: Path) -> Path:
+    """An .m4a is complete once its index ("moov") is written at the end. Waiting for that is quicker
+    than the ~4 s stop call, as the recorder stops itself at its limit."""
+    for _ in range(20):
+        if path.exists() and b"moov" in path.read_bytes():
+            return path
+        time.sleep(0.5)
+    raise RuntimeError("Recording failed: no complete audio file was written.")
+
+
+def cut_audio(source: Path, start: float, duration: float) -> Path:
+    target = source.with_name(f"{source.stem}_{start:.0f}s.m4a")
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-ss", f"{start:.1f}", "-t", f"{duration:.1f}", "-i", str(source),
+         "-c:a", "aac", "-b:a", "64k", str(target)],
+        check=True, timeout=60,
+    )
+    return target
+
+
+def frame_at(video: Path, seconds: float) -> Image.Image:
+    picture = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-ss", f"{seconds:.1f}", "-i", str(video), "-frames:v", "1",
+         "-f", "image2pipe", "-c:v", "png", "-"],
+        capture_output=True, check=True, timeout=60,
+    ).stdout
+    return Image.open(io.BytesIO(picture))
+
+
 def to_data_url(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.save(buffer, "JPEG", quality=60)
@@ -283,6 +326,8 @@ class Device:
         self.automator = None
         self.apps: dict[str, str] = {}  # package -> its launcher component
         self._specs = ""
+        self.mic_lock = threading.Lock()  # the recorder takes one recording at a time
+        self.live_audio: Callable[[int], Path] | None = None  # set while the sound watch streams the microphone
         match = re.search(r"(\d+)x(\d+)", shell("wm size"))
         self.width, self.height = (int(match[1]), int(match[2])) if match else (1080, 2340)
 
@@ -662,20 +707,13 @@ class Device:
 
     def record_audio_file(self, seconds: int) -> Path:
         """Record from the microphone only (no camera) using Termux:API; return the local file."""
-        AUDIO_DIR.mkdir(exist_ok=True)
-        path = AUDIO_DIR / f"audio_{time.strftime('%Y%m%d_%H%M%S')}.m4a"
-        options = ["-l", str(seconds), "-e", "aac", "-b", "96", "-r", "44100"]
-        started = subprocess.run([MIC_RECORDER, "-f", str(path), *options], capture_output=True, text=True, timeout=30)
-        if "Recording started" not in started.stdout:
-            raise RuntimeError(f"Could not start recording: {(started.stdout + started.stderr).strip()}")
-        time.sleep(seconds)
-        # The recorder stops itself at the limit. An .m4a is complete once its index ("moov") is written
-        # at the end, so wait for that instead of making a 4s stop call.
-        for _ in range(20):
-            if path.exists() and b"moov" in path.read_bytes():
-                return path
-            time.sleep(0.5)
-        raise RuntimeError("Recording failed: no complete audio file was written.")
+        if live := self.live_audio:  # the sound watch has the microphone, so cut the recording from its stream
+            return live(seconds)
+        with self.mic_lock:
+            path = AUDIO_DIR / f"audio_{time.strftime('%Y%m%d_%H%M%S')}.m4a"
+            start_recorder(path, seconds, ["-e", "aac", "-b", "96", "-r", "44100"])
+            time.sleep(seconds)
+            return wait_for_m4a(path)
 
     def record_audio(self, seconds: int) -> str:
         seconds = max(1, min(seconds, MAX_AUDIO_S))

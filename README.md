@@ -78,7 +78,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `search_contacts` | Find contacts by name or number |
 | `make_call`, `send_sms`, `send_email` | Always ask you first; calls/SMS need a SIM and airplane mode off |
 | `find_media`, `send_file`, `send_screenshot` | Find photos/videos, send any file or the screen to you |
-| `watch_motion`, `stop_watch` | Motion watch in the background (see below) |
+| `watch_motion`, `listen`, `stop_watch` | Camera watch (any movement, or only someone entering) and sound watch (a baby crying, a dog, an alarm...) in the background (see below) |
 | `remember`, `forget` | Long-term memory notes |
 | `schedule_task`, `list_schedules`, `cancel_schedule` | Run tasks later, once or on repeat |
 | `web_search`, `fetch_url` | Search the web (DuckDuckGo) and read pages as text, without the screen (~1 s) |
@@ -220,6 +220,26 @@ Maximum watch: 2 hours (continuous recording heats the phone).
 Android blocks background camera access, which is why it uses the camera app instead of capturing
 silently. Tune `MOTION_PIXEL_DIFF` / `MOTION_SHARE` in `device.py` if you get false alarms.
 
+**Only people:** `/watch 1h people` (or "tell me if anyone enters the room") alerts only when a person
+appears, not on light changes, curtains or pets. Each clip's moving frames (or one frame, when nothing
+moved) go through EfficientDet-Lite0 on the phone (~65 ms per frame). You're told once when someone
+enters, not every minute while they stay; after they leave, the next entry alerts again.
+
+### Sound watch
+
+`/listen 8h cry` (or "tell me if the baby cries tonight") listens with the microphone only, so the
+camera and screen stay free for other tasks and a camera watch can run at the same time. One Opus
+recording runs per half hour and is checked every 5 s while it's written, by YAMNet on the phone
+(~14 ms per second of audio). When the sound is heard in 2 half-second windows within 10 s, you get
+a message and the recording from 3 s before it (at most one alert per 2 minutes). Sounds: `cry`,
+`scream`, `dog`, `alarm`, `glass`, `door` (doorbell or knock); add more in `SOUNDS` in `watch.py`
+using [YAMNet's class names](https://github.com/tensorflow/models/blob/master/research/audioset/yamnet/yamnet_class_map.csv).
+Maximum: 12 hours. While listening, `/audio` and the AI's `record_audio` are cut from the live
+recording. Nothing is kept: each half-hour recording is deleted once checked.
+
+Both smart watches run fully offline on the phone. They need `ai-edge-litert` in the venv (see
+setup); the two models (~9 MB) are downloaded on first use and checked against pinned hashes.
+
 ### Free tier limits (October 2026)
 
 | Model | Per minute | Tokens / min | Per day |
@@ -298,7 +318,8 @@ m34-agent/
 │   ├── commands.py            instant /commands that skip the AI
 │   ├── net.py                 shared HTTPS connection pool (IPv4 first, kept warm)
 │   ├── store.py               memory notes, scheduled tasks, shortcuts
-│   ├── watch.py               motion watch (camera clips + frame comparison)
+│   ├── watch.py               camera watch (clips + frame comparison) and sound watch
+│   ├── detect.py              on-device sound and person recognition (YAMNet, EfficientDet)
 │   ├── web.py                 web search + page reading (public addresses only)
 │   └── config.example.json    bot token + API keys template
 ├── debian/
@@ -415,7 +436,7 @@ proot-distro install debian
 proot-distro login debian -- bash -c \
   "apt update && apt install -y python3 python3-pil python3-venv adb ffmpeg && useradd -m -s /bin/bash agent"
 proot-distro login debian --user agent -- bash -c \
-  "python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install uiautomator2"
+  "python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install uiautomator2 ai-edge-litert"
 
 ROOTFS=$PREFIX/var/lib/proot-distro/containers/debian/rootfs
 [ -d "$ROOTFS" ] || ROOTFS=$PREFIX/var/lib/proot-distro/installed-rootfs/debian   # older proot-distro
@@ -506,7 +527,8 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 | `/schedules`, `/unschedule N` | see scheduled tasks, cancel task N |
 | `/shortcuts`, `/delshortcut N` | see saved shortcuts, delete shortcut N |
 | `/usage` | Table of AI requests per model against the free daily limits (Groq's own numbers), and which models are paused |
-| `/watch 10m [front\|back]`, `/unwatch` | message me with a clip if anything moves; stop watching |
+| `/watch 10m [front\|back] [people]`, `/unwatch` | message me with a clip if anything moves (or only when someone enters); stop watching |
+| `/listen 8h [cry\|scream\|dog\|alarm\|glass\|door]`, `/unlisten` | message me with a recording when I hear the sound (default `cry`); stop listening |
 | `/stop` | stop the task and clear the queue |
 | `/new` | forget the conversation (memory notes stay) |
 
@@ -554,7 +576,7 @@ computer: edit -> commit -> git push  ──►  GitHub (private repo)  ──�
 
 `/update` fetches, fast-forwards, checks that every `bridge/*.py` compiles, then restarts into the new
 code and replies with the commits it pulled. If the new code doesn't compile it stays on the old
-commit. It refuses while a task or motion watch is running. The phone pulls with a **read-only deploy
+commit. It refuses while a task or watch is running. The phone pulls with a **read-only deploy
 key**, so it can't change the repository or reach your other repos.
 
 Setup on the phone (Debian, user `agent`):
