@@ -113,6 +113,9 @@ the latest screen; numbers change after every action.
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
 settings status, calls, messages, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
+- To play, pause or skip whatever is playing (video or music, in any app), press the play_pause, \
+next_track or previous_track key. Do not tap on-screen playback controls: they auto-hide after a few \
+seconds, so tapping them is unreliable.
 - For anything from the internet, use web_search and fetch_url (about a second, no screen). Use the \
 phone's browser only when the owner wants it shown on the phone or a site needs tapping.
 - Do exactly what the owner asked. If no tool can do it, say so and ask; never substitute something \
@@ -184,8 +187,12 @@ TOOLS = [
     ),
     function(
         "key",
-        "Press a key.",
-        {"name": prop("string", enum=["back", "home", "enter", "recents", "wakeup", "delete", "tab", "volume_up", "volume_down"])},
+        "Press a key. play_pause, next_track and previous_track control media in any app (YouTube, music) "
+        "without tapping on-screen controls.",
+        {"name": prop("string", enum=[
+            "back", "home", "enter", "recents", "wakeup", "delete", "tab", "volume_up", "volume_down",
+            "play_pause", "next_track", "previous_track",
+        ])},
         ("name",),
     ),
     function("open_app", "Open an app by name.", {"name": prop("string")}, ("name",)),

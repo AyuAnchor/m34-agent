@@ -65,7 +65,7 @@ service, so the agent controls the phone like a computer would, without touching
 |---|---|
 | `look` | Numbered list of on-screen elements + a screenshot with the numbers drawn on |
 | `tap` | Tap by visible text, by element number, or a point on a 0-1000 scale; optional long press |
-| `type_text`, `key`, `scroll` | Type, press back/home/enter/..., scroll up/down/left/right |
+| `type_text`, `key`, `scroll` | Type, press back/home/enter/media play-pause/next/previous/..., scroll up/down/left/right |
 | `open_app` | Open an app by name ("camera", "chrome"); only apps with a home-screen icon |
 | `wait` | Pause up to 2 minutes |
 | `take_photo`, `record_video` | Use the camera app (front or back), returns the file path |

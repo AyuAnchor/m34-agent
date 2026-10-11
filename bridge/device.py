@@ -129,6 +129,9 @@ KEYS = {
     "tab": "KEYCODE_TAB",
     "volume_up": "KEYCODE_VOLUME_UP",
     "volume_down": "KEYCODE_VOLUME_DOWN",
+    "play_pause": "KEYCODE_MEDIA_PLAY_PAUSE",
+    "next_track": "KEYCODE_MEDIA_NEXT",
+    "previous_track": "KEYCODE_MEDIA_PREVIOUS",
 }
 MEDIA_EXTENSIONS = {
     "photo": (".jpg", ".jpeg", ".png", ".heic", ".webp"),
