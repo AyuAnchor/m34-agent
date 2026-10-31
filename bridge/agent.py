@@ -1,6 +1,7 @@
 """Tool-using phone agent over free OpenAI-compatible model APIs, with automatic fallback."""
 import json
 import logging
+import queue
 import re
 import shlex
 import subprocess
@@ -34,6 +35,12 @@ PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq"}
 MODEL_TIMEOUT_S = 40  # give up and try the next model; healthy answers take under ~15 s
 SLOW_ANSWER_S = 25  # an answer slower than this sets the model aside for a while
 SLOW_COOLDOWN_S = 300
+MAX_SLOW_WAIT_S = 3600
+# No answer yet after this long: ask the next model too and take whichever answers first. Most answers
+# take 1-5 s, and a request that hangs would otherwise cost the full MODEL_TIMEOUT_S.
+HEDGE_S = 8
+MAX_PARALLEL = 3
+SHORT_LIMIT_WAIT_S = 20  # every model cooling down, but one is back within this: wait rather than give up
 PACIFIC = ZoneInfo("America/Los_Angeles")
 WORKSPACE_DIR = "/home/agent/agent"
 MAX_STEPS = 40
@@ -41,6 +48,7 @@ MAX_TOOL_OUTPUT = 6000
 MAX_WAIT_S = 120
 REPEAT_LIMIT = 3
 LOOP_WINDOW = 6
+SAME_SPOT = 25  # taps closer than about this on the 0-1000 scale count as repeats
 # Tools that use the screen, camera or microphone take the phone (device lock) for the rest of the task.
 # Chat and everything else never wait for a motion watch or a running command.
 SCREEN_TOOLS = {
@@ -106,8 +114,10 @@ memory, battery, hardware or chipset) must be read with a tool, never answered f
 not know this phone's specs, so guessing them gives false answers. Use phone_status for storage, \
 memory, battery and chipset in one call; getprop for other hardware details.
 - Call look before your first action. After tap, type_text, scroll, key, open_app, open_settings and open_url you \
-automatically get the new screen, so don't call look again after them. Tap by element number from \
-the latest screen; numbers change after every action.
+automatically get the new screen, so don't call look again after them. That screen comes with a \
+screenshot only when its element list is too sparse to go by; call look when you need to see the \
+picture itself (photos, colours, where things are). Tap by element number from the latest screen; \
+numbers change after every action.
 - Only when the target has no number, tap with x and y on a 0-1000 scale of the screenshot \
 (0,0 is top-left, 1000,1000 is bottom-right).
 - If the screen is off or black, press the wakeup key.
@@ -411,6 +421,8 @@ class Model:
     fast: int = 0  # rank among the quick models tried first for a task's first step (1 = first); 0 = not quick
     daily: int = 0  # free-tier requests per day (for /usage; the provider enforces it)
     cooldown_until: float = 0.0
+    slow_until: float = 0.0  # answering slowly lately: asked only after the other models
+    slow_strikes: int = 0
     strikes: int = 0
     out_of_quota: bool = False  # the last refusal was for the daily quota
     reported: tuple[int, int] | None = None  # (daily limit, left) as the provider last reported them
@@ -502,6 +514,37 @@ class StreamedReply:
         return message
 
 
+class TextGate:
+    """Passes on one model's streamed text: the first model to write owns the draft, so two models asked at
+    once can't mix their drafts, and nothing shows once the answer is in."""
+
+    def __init__(self, on_text: Callable[[str], None]) -> None:
+        self.on_text = on_text
+        self.owner: str | None = None
+        self.closed = False
+        self.lock = threading.Lock()
+
+    def writer(self, model: Model) -> Callable[[str], None]:
+        def write(text: str) -> None:
+            with self.lock:
+                if self.closed or self.owner not in (None, model.label):
+                    return
+                self.owner = model.label
+            self.on_text(text)
+
+        return write
+
+    def release(self, model: Model) -> None:
+        """A model that failed mid-answer gives the draft up to the others."""
+        with self.lock:
+            if self.owner == model.label:
+                self.owner = None
+
+    def close(self) -> None:
+        with self.lock:
+            self.closed = True
+
+
 class Router:
     """Sends each request to the best model that isn't cooling down after a limit or error."""
 
@@ -543,44 +586,106 @@ class Router:
         on_text: Callable[[str], None] | None = None,
     ) -> tuple[dict[str, Any], Model]:
         """Ask the best available model. fast_first tries the quickest models first (a task's first step:
-        plain chat ends there); later steps go to the smartest. on_text receives a text answer as it's
-        written."""
+        plain chat ends there); later steps go to the smartest. A model with no answer after HEDGE_S gets
+        company: the next model is asked too and the first answer wins. on_text receives a text answer as
+        it's written."""
         order = sorted(self.models, key=lambda m: (m.fast == 0, m.fast)) if fast_first else self.models
-        failed = skipped = False
-        for model in order:
-            if model.cooldown_until > time.time():
-                skipped = True
-                continue
-            try:
-                message = self.call(model, messages, on_text)
-            except ProviderError as error:
-                if error.status == 400 and model.effort:  # this model doesn't take the thinking setting
-                    log.warning(f"{model.label} rejected reasoning_effort={model.effort}; sending without it")
-                    model.effort = None
-                    try:
-                        message = self.call(model, messages, on_text)
-                    except ProviderError as retry_error:
-                        error = retry_error
-                    else:
-                        return self.succeeded(model, message, failed, skipped, fast_first)
-                self.penalize(model, error.status, error.detail, retry_after(error.headers, error.detail))
-                failed = True
-                continue
-            except TimeoutError as error:
-                self.penalize(model, 504, f"no answer within {MODEL_TIMEOUT_S}s: {error}", None)
-                failed = True
-                continue
-            except (OSError, ValueError) as error:
-                self.penalize(model, 0, str(error), None)
-                failed = True
-                continue
-            if model.latency > SLOW_ANSWER_S:  # keep this answer, but send the next steps elsewhere
-                model.cooldown_until = time.time() + SLOW_COOLDOWN_S
-                self.last_failure = f"{model.short} slow at {PROVIDER_NAMES.get(model.family, model.family)}"
-                log.warning(f"{model.label} took {model.latency:.0f}s; setting it aside for {SLOW_COOLDOWN_S}s")
-                return self.succeeded(model, message, True, skipped, fast_first)
-            return self.succeeded(model, message, failed, skipped, fast_first)
+        running: dict[str, tuple[Model, float]] = {}  # label -> (model, when it was asked)
+        outcomes: queue.Queue[tuple[Model, dict[str, Any] | None]] = queue.Queue()
+        gate = TextGate(on_text) if on_text else None
+        failed = skipped = waited = False
+
+        def start() -> bool:
+            """Ask the next model that isn't cooling down or already asked. Not the same model as one still
+            thinking (on another key it's likely just as slow), and models set aside as slow come last."""
+            nonlocal skipped
+            now = time.time()
+            busy = {model.name for model, _ in running.values()}
+            ready = [m for m in order if m.cooldown_until <= now and m.name not in busy]
+            ready.sort(key=lambda m: m.slow_until > now)
+            if not ready:
+                return False
+            model = ready[0]
+            skipped = skipped or (not running and model is not order[0])
+            running[model.label] = (model, now)
+            threading.Thread(target=self.attempt, args=(model, messages, gate, outcomes), daemon=True).start()
+            return True
+
+        start()
+        try:
+            while True:
+                if not running:
+                    wait = min((m.cooldown_until for m in order), default=float("inf")) - time.time()
+                    if waited or wait > SHORT_LIMIT_WAIT_S:
+                        break
+                    log.info(f"every model is cooling down; waiting {wait:.0f}s for the first to be back")
+                    time.sleep(max(0.0, wait))
+                    waited = True
+                    if not start():
+                        break
+                try:
+                    model, message = outcomes.get(timeout=HEDGE_S if len(running) < MAX_PARALLEL else None)
+                except queue.Empty:
+                    if start():
+                        labels = list(running)
+                        log.info(f"no answer from {labels[0]} in {HEDGE_S}s; also asking {labels[-1]}")
+                    continue
+                _, asked = running.pop(model.label)
+                if message is None:  # attempt() has put it on a cooldown; ask the next one right away
+                    failed = True
+                    start()
+                    continue
+                for slower, since in running.values():  # asked earlier and still thinking: send the next steps elsewhere
+                    if since < asked:
+                        self.set_aside(slower, f"lost to {model.label}")
+                        failed = True
+                if model.latency > SLOW_ANSWER_S:
+                    self.set_aside(model, f"took {model.latency:.0f}s")
+                    failed = True
+                else:
+                    model.slow_strikes = 0
+                return self.succeeded(model, message, failed, skipped, fast_first)
+        finally:
+            if gate:
+                gate.close()
         raise NoModelAvailable("All models are rate-limited or failing right now. Try again later.")
+
+    def attempt(
+        self, model: Model, messages: list[dict[str, Any]], gate: TextGate | None, outcomes: queue.Queue
+    ) -> None:
+        """One model's try, on its own thread: puts (model, answer), or (model, None) once a failing model
+        is on a cooldown."""
+        message = None
+        try:
+            try:
+                message = self.call(model, messages, gate.writer(model) if gate else None)
+            except ProviderError as error:
+                if error.status != 400 or not model.effort:
+                    raise
+                log.warning(f"{model.label} rejected reasoning_effort={model.effort}; sending without it")
+                model.effort = None  # this model doesn't take the thinking setting
+                message = self.call(model, messages, gate.writer(model) if gate else None)
+        except ProviderError as error:
+            self.penalize(model, error.status, error.detail, retry_after(error.headers, error.detail))
+        except TimeoutError as error:
+            self.penalize(model, 504, f"no answer within {MODEL_TIMEOUT_S}s: {error}", None)
+        except (OSError, ValueError) as error:
+            self.penalize(model, 0, str(error), None)
+        except Exception as error:
+            log.exception(f"{model.label} request failed")
+            self.penalize(model, 0, str(error), None)
+        finally:
+            if gate and message is None:
+                gate.release(model)
+            outcomes.put((model, message))
+
+    def set_aside(self, model: Model, why: str) -> None:
+        """Ask a slow model only after the others for a while: 5 minutes, doubling while it stays slow."""
+        model.slow_strikes += 1
+        wait = min(SLOW_COOLDOWN_S * 2 ** (model.slow_strikes - 1), MAX_SLOW_WAIT_S)
+        model.slow_until = time.time() + wait
+        self.last_failure = f"{model.short} slow at {PROVIDER_NAMES.get(model.family, model.family)}"
+        log.warning(f"{model.label} {why}; setting it aside for {wait}s")
 
     def succeeded(
         self, model: Model, message: dict[str, Any], failed: bool, skipped: bool, fast_first: bool
@@ -720,6 +825,21 @@ def drop_old_screen_lists(messages: list[dict[str, Any]], before: int) -> None:
             message["content"] = f"{action.strip()} {compact_screen(SCREEN_MARKER + listing)}".strip()
 
 
+def action_key(call: dict[str, Any]) -> str:
+    """What a call does, for spotting repeats: argument order doesn't matter, and taps a few units apart
+    on the 0-1000 scale hit the same spot."""
+    name = call["function"]["name"]
+    try:
+        args = json.loads(call["function"].get("arguments") or "{}")
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        args = {"args": args}
+    if name == "tap":
+        args = {k: round(v / SAME_SPOT) if k in ("x", "y") and isinstance(v, (int, float)) else v for k, v in args.items()}
+    return json.dumps([name, args], sort_keys=True)
+
+
 def is_refusal(message: dict[str, Any]) -> bool:
     """A plain-text reply that declines the request."""
     return not message.get("tool_calls") and bool(REFUSAL.search(message.get("content") or ""))
@@ -793,7 +913,7 @@ class Agent:
         self.on_text = on_text
         self.cancelled = cancelled
         self.handlers: dict[str, Callable[[dict[str, Any], Model], str | tuple[str, str | None]]] = {
-            "look": lambda a, m: self.device.look(with_image=m.vision),
+            "look": lambda a, m: self.device.look(picture=True),
             "tap": lambda a, m: self.device.tap(
                 as_int(a.get("element")),
                 as_float(a.get("x")),
@@ -923,11 +1043,12 @@ class Agent:
                     calls = [replay for _, replay in done_steps]
                     self.shortcuts.save(request, [text for text, _ in done_steps], calls if all(calls) else [])
                 return (message.get("content") or "").strip() or "(no reply)"
-            signature = json.dumps([(c["function"]["name"], c["function"].get("arguments")) for c in calls])
+            signature = json.dumps([action_key(c) for c in calls])
             recent = (recent + [signature])[-LOOP_WINDOW:]
             images, first_result = [], len(messages)
-            for call in calls:
-                result, image = self.execute(call, model)
+            last_move = max((n for n, c in enumerate(calls) if c["function"]["name"] in SHOWS_SCREEN_AFTER), default=-1)
+            for number, call in enumerate(calls):
+                result, image = self.execute(call, model, show_screen=number == last_move)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
                 if image:
                     images.append(image)
@@ -942,6 +1063,12 @@ class Agent:
             # Catches both repeats (A A A) and back-and-forth loops (A B A B A).
             looping = recent.count(signature) >= REPEAT_LIMIT
             if looping and not any(c["function"]["name"] in ("look", "wait") for c in calls):
+                if went_in_circles:  # warned once already and still repeating: more steps won't help
+                    action = calls[-1]["function"]
+                    return (
+                        f"Stopped: I kept repeating the same action ({action['name']} {action.get('arguments') or ''}) "
+                        "without getting anywhere. Tell me more exactly what to tap, or try it another way."
+                    )
                 messages.append({
                     "role": "user",
                     "content": "You are going in circles, repeating the same actions without progress. Stop: "
@@ -968,7 +1095,7 @@ class Agent:
                     break
                 args["path"] = last_file
             call = {"id": f"replay-{number}", "type": "function", "function": {"name": saved["name"], "arguments": json.dumps(args)}}
-            result, _ = self.execute(call, REPLAY_MODEL)
+            result, _ = self.execute(call, REPLAY_MODEL, show_screen=False)
             calls.append(call)
             results.append(result)
             if result.startswith(FAILED_RESULTS):
@@ -983,7 +1110,7 @@ class Agent:
         messages.append({"role": "assistant", "content": None, "tool_calls": calls})
         messages.extend({"role": "tool", "tool_call_id": c["id"], "content": r} for c, r in zip(calls, results))
         drop_old_screen_lists(messages, len(messages))
-        screen, image = self.device.look(with_image=True) if self.claim_device() else ("(screen unavailable)", None)
+        screen, image = self.device.look() if self.claim_device() else ("(screen unavailable)", None)
         total = len(shortcut["calls"])
         outcome = "All of them ran." if len(done) == total else f"It stopped after {len(calls)} of {total} steps."
         note = (
@@ -995,7 +1122,9 @@ class Agent:
             messages.append({"role": "user", "content": [{"type": "text", "text": "Current screen:"}, {"type": "image_url", "image_url": {"url": image}}]})
         return done
 
-    def execute(self, call: dict[str, Any], model: Model) -> tuple[str, str | None]:
+    def execute(self, call: dict[str, Any], model: Model, show_screen: bool = True) -> tuple[str, str | None]:
+        """Run one tool call. After a screen-changing one, show_screen adds the new screen to the result (one
+        read per batch of calls is enough: only the last screen matters)."""
         name = call["function"]["name"]
         try:
             args = json.loads(call["function"].get("arguments") or "{}")
@@ -1021,8 +1150,8 @@ class Agent:
         if isinstance(result, tuple):
             return result
         result = str(result)[-MAX_TOOL_OUTPUT:]
-        if name in SHOWS_SCREEN_AFTER:  # saves the AI a separate look round trip (~1-3 s each)
-            screen, image = self.device.look(with_image=model.vision)
+        if show_screen and name in SHOWS_SCREEN_AFTER:  # saves the AI a separate look round trip (~1-3 s each)
+            screen, image = self.device.look()
             return f"{result}\n\n{screen}", image
         return result, None
 

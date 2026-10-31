@@ -35,8 +35,10 @@ MEDIA_DIR = Path("/tmp/agent-media")
 CAMERA_DIR = "/sdcard/DCIM/Camera"
 SCREENSHOT_DIR = "/sdcard/DCIM/Screenshots"
 MAX_ELEMENTS = 80
+MIN_LABELED = 3  # fewer labeled elements than this and the AI gets a screenshot with the list
 WIRELESS_DEBUG_PROMPT = "Allow wireless debugging on this network?"
 STABLE_TIMEOUT_S = 2.5
+TEXT_WAIT_S = 1.5  # a tap by text waits this long for its text to show up
 MAX_VIDEO_S = 30
 MAX_AUDIO_S = 120
 SAVE_WAIT_S = 12
@@ -117,7 +119,12 @@ SETTINGS_PAGES = {
 }
 # NEW_TASK | CLEAR_TOP: otherwise Settings ignores a new page while another Settings page is showing.
 SETTINGS_FLAGS = " -f 0x14000000"
-APP_ALIASES = {"playstore": "com.android.vending", "files": "com.sec.android.app.myfiles"}
+APP_ALIASES = {
+    "playstore": "com.android.vending",
+    "files": "com.sec.android.app.myfiles",
+    "messages": "com.google.android.apps.messaging",
+    "phone": "com.samsung.android.dialer",
+}
 ALARM_EXTRA = "android.intent.extra.alarm"
 KEYS = {
     "back": "KEYCODE_BACK",
@@ -333,6 +340,7 @@ class Device:
         self.live_audio: Callable[[int], Path] | None = None  # set while the sound watch streams the microphone
         match = re.search(r"(\d+)x(\d+)", shell("wm size"))
         self.width, self.height = (int(match[1]), int(match[2])) if match else (1080, 2340)
+        self.portrait = (min(self.width, self.height), max(self.width, self.height))
 
     def specs(self) -> str:
         """This phone's fixed facts (model, OS, chipset, total RAM and storage), read once and cached.
@@ -374,6 +382,9 @@ class Device:
             root = ET.fromstring(xml)
         except ET.ParseError:
             return []
+        if (rotation := root.get("rotation")) in ("0", "1", "2", "3"):
+            short, long = self.portrait
+            self.width, self.height = (long, short) if rotation in ("1", "3") else (short, long)
         elements: list[Element] = []
         seen = set()
         for node in root.iter("node"):
@@ -434,17 +445,25 @@ class Device:
             elements = again
         return elements
 
-    def look(self, with_image: bool) -> tuple[str, str | None]:
-        """Number the on-screen elements; return the list and, for vision models, a marked screenshot."""
+    def look(self, picture: bool = False) -> tuple[str, str | None]:
+        """Number the on-screen elements; return the list and a marked screenshot when asked for (picture)
+        or when the list can't describe the screen (games, camera, icon-only buttons). A screenshot about
+        doubles the AI's answer time, and most screens read fine as a list."""
         self.elements = self.read_stable_elements()
-        image = self.snapshot()
         lines = [
             f"[{n}] {e.label or '(no label)'}{f' #{e.resource}' if e.resource else ''} {e.flags}".rstrip()
             for n, e in enumerate(self.elements, 1)
         ]
         listing = "\n".join(lines) or "(no elements found: tap with x/y on the 0-1000 scale)"
         text = f"Elements on screen (tap by number):\n{listing}"
-        return text, to_data_url(self.mark(image)) if with_image else None
+        if picture or self.unreadable():
+            return text, to_data_url(self.mark(self.snapshot()))
+        return f"{text}\n(No screenshot this time: call look to see the picture.)", None
+
+    def unreadable(self) -> bool:
+        """Too few labels on screen for the element list alone to describe it."""
+        labeled = sum(1 for e in self.elements if e.label)
+        return labeled < MIN_LABELED or labeled < len(self.elements) / 2
 
     def mark(self, image: Image.Image) -> Image.Image:
         """Draw each element's number on the screenshot (Set-of-Mark), skipping full-screen containers."""
@@ -465,19 +484,23 @@ class Device:
 
     def find_text(self, text: str) -> int | None:
         """Number of the element whose label matches text exactly, else contains it as whole words
-        (so "Stop" never matches "Stopwatch")."""
-        self.elements = self.read_elements()
+        (so "Stop" never matches "Stopwatch"). Keeps reading for a moment while it's missing: the screen may
+        still be changing after the previous action."""
         wanted = text.strip().lower()
         whole_words = re.compile(rf"(?<!\w){re.escape(wanted)}(?!\w)")
-        labels = [e.label.lower() for e in self.elements]
-        for matches in (
-            lambda label: label == wanted,
-            lambda label: whole_words.search(label) is not None,
-        ):
-            for number, label in enumerate(labels, 1):
-                if label and matches(label):
-                    return number
-        return None
+        deadline = time.time() + TEXT_WAIT_S
+        while True:
+            self.elements = self.read_elements()
+            labels = [e.label.lower() for e in self.elements]
+            for matches in (
+                lambda label: label == wanted,
+                lambda label: whole_words.search(label) is not None,
+            ):
+                for number, label in enumerate(labels, 1):
+                    if label and matches(label):
+                        return number
+            if time.time() > deadline:
+                return None
 
     def tap(
         self, element: int | None, x: float | None, y: float | None, hold_ms: int | None, text: str | None = None
@@ -498,11 +521,32 @@ class Device:
         else:
             return "Give an element number, or x and y on the 0-1000 scale."
         if hold_ms:
-            shell(f"input swipe {px} {py} {px} {py} {int(hold_ms)}")
+            self.swipe(px, py, px, py, int(hold_ms))
         else:
-            shell(f"input tap {px} {py}")
+            self.click(px, py)
         time.sleep(ACTION_PAUSE_S)
         return f"{'Long-pressed' if hold_ms else 'Tapped'} {what}."
+
+    def click(self, x: int, y: int) -> None:
+        """Through the automation server when it's up (~0.15 s quicker: `input` starts a new process each time)."""
+        try:
+            if automator := self.fast():
+                automator.click(x, y)
+                return
+        except Exception as error:
+            log.warning(f"fast tap failed, using input: {error}")
+            self.automator = None
+        shell(f"input tap {x} {y}")
+
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, ms: int) -> None:
+        try:
+            if automator := self.fast():
+                automator.swipe(x1, y1, x2, y2, duration=ms / 1000)
+                return
+        except Exception as error:
+            log.warning(f"fast swipe failed, using input: {error}")
+            self.automator = None
+        shell(f"input swipe {x1} {y1} {x2} {y2} {ms}")
 
     def type_text(self, text: str, submit: bool) -> str:
         if not text.isascii():
@@ -524,7 +568,7 @@ class Device:
         }
         if direction not in moves:
             return "Direction must be up, down, left or right."
-        shell("input swipe {} {} {} {} 400".format(*moves[direction]))
+        self.swipe(*moves[direction], 400)
         time.sleep(ACTION_PAUSE_S)
         return f"Scrolled {direction}."
 
@@ -619,6 +663,10 @@ class Device:
             return package
         for refresh in (False, True):
             matches = [p for p in self.launchable(refresh) if query in p.lower()]
+            # Or the package's last word inside the name: "Hill Climb Racing" is com.fingersoft.hillclimb.
+            matches = matches or [
+                p for p in self.launchable() if len(last := p.lower().rsplit(".", 1)[-1]) >= 5 and last in query
+            ]
             if matches:
                 return matches[0]  # shortest name is usually the main app
         return None

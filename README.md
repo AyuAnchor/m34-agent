@@ -66,7 +66,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `look` | Numbered list of on-screen elements + a screenshot with the numbers drawn on |
 | `tap` | Tap by visible text, by element number, or a point on a 0-1000 scale; optional long press |
 | `type_text`, `key`, `scroll` | Type, press back/home/enter/media play-pause/next/previous/..., scroll up/down/left/right |
-| `open_app` | Open an app by name ("camera", "chrome"); only apps with a home-screen icon |
+| `open_app` | Open an app by name ("camera", "chrome", "Hill Climb Racing"); only apps with a home-screen icon |
 | `wait` | Pause up to 2 minutes |
 | `take_photo`, `record_video` | Use the camera app (front or back), returns the file path |
 | `record_audio` | Record from the microphone only (Termux:API), up to 2 minutes |
@@ -95,7 +95,13 @@ taps on a 0-1000 scale, which is how Gemini models naturally describe positions.
 After `tap`, `type_text`, `scroll`, `key`, `open_app`, `open_settings` and `open_url` the new screen comes back
 automatically, so the AI doesn't spend a separate round trip on `look` (about half the AI calls).
 The screen is read only once it's stable (two identical reads in a row, ~250 ms each), so a page that's still
-animating isn't mistaken for "my tap did nothing".
+animating isn't mistaken for "my tap did nothing". When the AI sends several actions at once, the
+screen is read once, after the last one, and a tap by text waits up to 1.5 s for its text to appear.
+
+That automatic screen comes with a screenshot only when the element list is too sparse to go by
+(fewer than 3 labels, or mostly unlabeled: games, the camera, icon-only buttons). A screenshot
+about doubles the AI's answer time (Flash-Lite: ~2 s instead of ~0.9 s), and most screens read
+fine as a list. An explicit `look` always includes it, so the AI can still see photos, colours or layout.
 
 The list leaves out what's on every screen (status bar icons, the Back/Home/Recents buttons, the edge
 panel handle; the `key` tool presses those) and folds each settings row's title and switch into one
@@ -105,14 +111,18 @@ Older screen lists are compacted to just their text ("earlier screen showed: And
 the AI keeps the facts it read while the re-sent conversation stays small.
 
 If the same action comes up 3 times in the last 6 steps (repeats or back-and-forth loops), the AI
-is told it's going in circles and to change approach.
+is told it's going in circles and to change approach. Taps less than ~25 apart on the 0-1000 scale
+count as the same tap. If it starts repeating again after that warning, the task stops and says
+which action it kept repeating.
 
 ### Fast screen reading
 
 Android's built-in `uiautomator dump` starts a new process on every call (~3 s). The agent instead
 uses [uiautomator2](https://github.com/openatx/uiautomator2), which keeps a small automation server
-running on the phone: a full `look` (elements + marked screenshot) takes **~0.5 s**. If the server
-dies (reboot, adb restart) it is restarted automatically, and the old method is the fallback.
+running on the phone: a full `look` (elements + marked screenshot) takes **~0.5 s**. Taps and
+swipes go through the same server (~0.13 s, against ~0.3 s for `input`, which starts a new process
+each time). If the server dies (reboot, adb restart) it is restarted automatically, and the old
+methods are the fallback.
 
 ### Memory and schedules
 
@@ -166,6 +176,12 @@ since 00:48)`, and you get one message only if the main models keep failing for 
 limit follows the provider's own "retry in N seconds" hint when it gives one, so the best model
 comes back quickly. Server errors and network failures back off 1, 2, 4... minutes (up to 15), so a
 busy spell doesn't bounce the task between models. A used-up **daily** quota is retried hourly.
+
+**Slow answers.** Most answers take 1-5 s, but an overloaded model sometimes sends nothing until the
+40 s timeout. So when a model hasn't answered within 8 s, the next one (a different model) is asked
+too and the first answer wins, up to 3 at once. A model that loses this race, or takes over 25 s,
+is asked only after the others for 5 minutes, doubling while it stays slow (up to an hour). If every
+model is briefly rate-limited (back within 20 s), the bot waits rather than giving up.
 
 ### Speed
 
