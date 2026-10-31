@@ -37,6 +37,7 @@ TEMPLATES = {
     "second_chance": (232, 32),
     "touch_to_continue": (338, 177),  # blinks; matches in its bright phase
     "pause": (582, 10),
+    "paused": (296, 24),  # the pause menu's title: going home mid-run pauses the game
     "gas_label": (548, 255),  # labels, not the pedals: their holes show the scenery behind
     "brake_label": (48, 255),
 }
@@ -50,6 +51,7 @@ CLOSE_SECOND_CHANCE = (0.672, 0.129)  # the X; the big green button would play a
 TOUCH_TO_CONTINUE = (0.656, 0.850)
 START_REGULAR = (0.484, 0.881)
 MENU_START = (0.728, 0.673)
+RESUME = (0.5, 0.279)
 # Car tracking and driving.
 SEARCH_AREA = (0.0, 0.15, 0.5, 0.68)  # the camera keeps the car in the left half, between HUD and pedals
 TRACK_WINDOW = (0.11, 0.15)  # half width and half height around the last position
@@ -57,6 +59,7 @@ MIN_CAR_PIXELS = 80
 MAX_GAP = 3  # pixels; the body has thin dark outlines that shouldn't split it
 MAX_TURN_PER_FRAME = 35  # degrees; a bigger jump is a misread, not the car
 MERGED_GROWTH = 1.2  # this many times the car's usual pixel count means something red touches it
+MAX_REJECTED = 6  # misreads in a row; past this the new reading is the car (it really turned, or the old one was wrong)
 LOOKAHEAD_S = 0.25  # react to where the tilt is heading (covers screen-to-touch latency)
 COAST_ABOVE = 30  # nose-up degrees: let go of the gas
 BRAKE_ABOVE = 50  # nose-up degrees: brake to turn the nose back down
@@ -101,6 +104,7 @@ class View(str, Enum):
     RESULTS = "results"  # "Out of fuel" / "Driver down", touch to continue
     RAIN_POPUP = "rain popup"  # "Heavy rain mode" offer before a run
     MENU = "menu"
+    PAUSED = "paused"
     UNKNOWN = "unknown"
 
 
@@ -119,6 +123,8 @@ def view_of(frame: np.ndarray) -> View:
         return View.RAIN_POPUP
     if shows(frame_grey, "menu_start") or shows(frame_grey, "menu_start_stage"):
         return View.MENU
+    if shows(frame_grey, "paused"):
+        return View.PAUSED
     return View.UNKNOWN
 
 
@@ -132,6 +138,8 @@ def next_tap(view: View) -> tuple[float, float] | None:
         return START_REGULAR
     if view == View.MENU:
         return MENU_START
+    if view == View.PAUSED:
+        return RESUME
     return None
 
 
@@ -175,6 +183,7 @@ class Pilot:
     angle: float = 0.0
     pixels: float = 0.0  # the car's usual size in pixels, smoothed
     history: list[tuple[float, float]] = field(default_factory=list)  # (time, angle)
+    rejected: int = 0
 
     def car(self, frame: np.ndarray) -> tuple[float, float, float, int] | None:
         """(x, y, tilt in degrees with nose up positive, pixel count) of the car body, or None."""
@@ -209,9 +218,14 @@ class Pilot:
         # A fuel can touching the car merges with it for a few frames (same red); its extra pixels
         # give it away, since the car's own size only changes slowly as the camera zooms.
         merged = self.pixels and pixels > self.pixels * MERGED_GROWTH
-        if self.history and (merged or abs(angle - self.angle) > MAX_TURN_PER_FRAME):
+        misread = self.history and (merged or abs(angle - self.angle) > MAX_TURN_PER_FRAME)
+        if misread and self.rejected < MAX_REJECTED:
+            self.rejected += 1
             return self.pedals(self.angle)
-        self.pixels = pixels if not self.pixels else self.pixels * 0.8 + pixels * 0.2
+        if misread:
+            self.history = []
+        self.rejected = 0
+        self.pixels = pixels if not self.pixels or merged else self.pixels * 0.8 + pixels * 0.2
         self.position, self.angle = (x, y), angle
         self.history = [(t, a) for t, a in self.history if now - t < 0.3] + [(now, angle)]
         first_time, first_angle = self.history[0]
@@ -227,7 +241,7 @@ class Pilot:
         return True, False
 
     def reset(self) -> None:
-        self.position, self.angle, self.pixels, self.history = None, 0.0, 0.0, []
+        self.position, self.angle, self.pixels, self.history, self.rejected = None, 0.0, 0.0, [], 0
 
 
 class Autopilot:
