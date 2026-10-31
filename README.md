@@ -159,10 +159,17 @@ projects used only to multiply free quota can count as; the risk is Google suspe
 1. `gemini-3-flash-preview` (sees images)
 2. `gemini-flash-latest` (sees images)
 3. `gemini-3.6-flash` (sees images)
-4. `gemini-flash-lite-latest` (sees images)
-5. `gemini-3.1-flash-lite` (sees images)
-6. Groq `qwen/qwen3.8-27b` (sees images)
-7. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+4. NVIDIA `nvidia/nemotron-3.5-super-vl-120b-a12b` (sees images)
+5. `gemini-flash-lite-latest` (sees images)
+6. `gemini-3.1-flash-lite` (sees images)
+7. NVIDIA `mistralai/mistral-large-4-1t-a52b` (sees images)
+8. Groq `qwen/qwen3.8-27b` (sees images)
+9. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+
+NVIDIA's models are used only when `"nvidia"` is in the config. Nemotron answered agent steps in ~2 s in
+testing (November 2026), as fast as Flash Lite, with a much larger daily allowance. Other NVIDIA models
+that see images (DeepSeek V4.1 Flash, Gemma 4) often took over 40 s, so they aren't used. NVIDIA calls
+its free API a trial for prototyping and may throttle it when busy.
 
 Each model has its own daily quota, so a model is listed once under one name: Google's deprecated
 IDs (`gemini-3.7-flash`, `gemini-3.5-flash`) and the `-latest` aliases share quota with the model
@@ -290,6 +297,7 @@ won't match and it stops without tapping.
 | Gemini 3.6 Flash (`gemini-3.6-flash`) | 5 | 250K | 20 |
 | Gemini 3.5 Flash Lite (`gemini-flash-lite-latest`) | 15 | 250K | 500 |
 | Gemini 3.1 Flash Lite (`gemini-3.1-flash-lite`) | 15 | 250K | 500 |
+| NVIDIA (all models together) | up to 40 | - | ~10,000 |
 | Groq `openai/gpt-oss-120b` | ~30 | 8K | 1,000 |
 | Groq `qwen/qwen3.8-27b` | ~30 | 8K (7K input) | 1,000 |
 
@@ -394,6 +402,8 @@ Commands marked **[computer]** run on your computer; **[termux]** run in the Ter
   Optional: `/setjoingroups` → Disable.
 - **Gemini**: aistudio.google.com → Get API key → Create. Don't enable billing.
 - **Groq**: console.groq.com → API Keys → Create. Copy it right away (shown once).
+- **NVIDIA** (optional): build.nvidia.com → sign in (Google works) → verify a phone number by SMS →
+  API Keys → Generate API Key. Shown once; it starts with `nvapi-`.
 
 ### 2. Prepare the phone
 

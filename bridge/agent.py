@@ -23,6 +23,7 @@ log = logging.getLogger("agent")
 ENDPOINTS = {  # provider -> (host, path) of its OpenAI-compatible chat endpoint
     "gemini": ("generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"),
     "groq": ("api.groq.com", "/openai/v1/chat/completions"),
+    "nvidia": ("integrate.api.nvidia.com", "/v1/chat/completions"),
 }
 COOLDOWNS_PATH = STATE_DIR / "cooldowns.json"
 # Quotas used up "per day" free up sooner than the documented reset (Groq's window rolls, and Gemini has
@@ -30,7 +31,7 @@ COOLDOWNS_PATH = STATE_DIR / "cooldowns.json"
 DAILY_RECHECK_S = 3600
 MAX_TROUBLE_WAIT_S = 900  # server errors and network failures back off 1, 2, 4... minutes, up to this
 TROUBLE_STALE_S = 900  # a problem not seen again for this long counts as over
-PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq"}
+PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq", "nvidia": "NVIDIA"}
 # When a provider is overloaded, a model may still answer but take minutes (seen: 123 s for one step).
 MODEL_TIMEOUT_S = 40  # give up and try the next model; healthy answers take under ~15 s
 SLOW_ANSWER_S = 25  # an answer slower than this sets the model aside for a while
@@ -451,10 +452,12 @@ MODELS = [
     Model("gemini#2", "gemini-flash-latest", vision=True, effort="low", daily=20),
     Model("gemini", "gemini-3.6-flash", vision=True, effort="low", daily=20),
     Model("gemini#2", "gemini-3.6-flash", vision=True, effort="low", daily=20),
+    Model("nvidia", "nvidia/nemotron-3.5-super-vl-120b-a12b", vision=True, daily=10000),  # NVIDIA's 10K/day is per account
     Model("gemini", "gemini-flash-lite-latest", vision=True, daily=500),
     Model("gemini#2", "gemini-flash-lite-latest", vision=True, daily=500),
     Model("gemini", "gemini-3.1-flash-lite", vision=True, daily=500),
     Model("gemini#2", "gemini-3.1-flash-lite", vision=True, daily=500),
+    Model("nvidia", "mistralai/mistral-large-4-1t-a52b", vision=True, daily=10000),
     Model("groq", "qwen/qwen3.8-27b", vision=True, fast=2, daily=1000),
     Model("groq", "openai/gpt-oss-120b", vision=False, effort="low", fast=1, daily=1000),
 ]
