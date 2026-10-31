@@ -158,9 +158,16 @@ projects used only to multiply free quota can count as; the risk is Google suspe
 
 1. `gemini-3-flash-preview` (sees images)
 2. `gemini-flash-latest` (sees images)
-3. `gemini-flash-lite-latest` (sees images)
-4. Groq `qwen/qwen3.8-27b` (sees images)
-5. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+3. `gemini-3.6-flash` (sees images)
+4. `gemini-flash-lite-latest` (sees images)
+5. `gemini-3.1-flash-lite` (sees images)
+6. Groq `qwen/qwen3.8-27b` (sees images)
+7. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+
+Each model has its own daily quota, so a model is listed once under one name: Google's deprecated
+IDs (`gemini-3.7-flash`, `gemini-3.5-flash`) and the `-latest` aliases share quota with the model
+they point to. Gemma 4 on the Gemini API returned server errors or timed out in testing (November
+2026), so it isn't used.
 
 **Fast first step.** A task's first step goes to the quickest models (Groq `gpt-oss-120b`, then
 Groq `qwen`). Plain chat ("hi", a quick question) ends right there in under a second. If the quick model refuses
@@ -280,12 +287,14 @@ won't match and it stops without tapping.
 |---|---|---|---|
 | Gemini 3 Flash (`gemini-3-flash-preview`) | 5 | 250K | 20 |
 | Gemini 3.8 Flash (`gemini-flash-latest`) | 5 | 250K | 20 |
+| Gemini 3.6 Flash (`gemini-3.6-flash`) | 5 | 250K | 20 |
 | Gemini 3.5 Flash Lite (`gemini-flash-lite-latest`) | 15 | 250K | 500 |
+| Gemini 3.1 Flash Lite (`gemini-3.1-flash-lite`) | 15 | 250K | 500 |
 | Groq `openai/gpt-oss-120b` | ~30 | 8K | 1,000 |
 | Groq `qwen/qwen3.8-27b` | ~30 | 8K (7K input) | 1,000 |
 
-Every agent step is one request, so the two smartest Gemini models cover only a few phone tasks a
-day; Flash Lite does most of the work. Gemini limits are per Google Cloud project and reset at
+Every agent step is one request, so the three Gemini Flash models cover only a few phone tasks a
+day; the Flash Lite models do most of the work. Gemini limits are per Google Cloud project and reset at
 midnight Pacific time, though quota has come back sooner in practice, so a model that runs out
 is tried again every hour. Groq's daily limit is a rolling 24-hour window that it reports in
 response headers, and `/usage` shows those numbers as Groq gives them. Check Gemini's at

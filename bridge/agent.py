@@ -449,8 +449,12 @@ MODELS = [
     Model("gemini#2", "gemini-3-flash-preview", vision=True, effort="low", daily=20),
     Model("gemini", "gemini-flash-latest", vision=True, effort="low", daily=20),
     Model("gemini#2", "gemini-flash-latest", vision=True, effort="low", daily=20),
+    Model("gemini", "gemini-3.6-flash", vision=True, effort="low", daily=20),
+    Model("gemini#2", "gemini-3.6-flash", vision=True, effort="low", daily=20),
     Model("gemini", "gemini-flash-lite-latest", vision=True, daily=500),
     Model("gemini#2", "gemini-flash-lite-latest", vision=True, daily=500),
+    Model("gemini", "gemini-3.1-flash-lite", vision=True, daily=500),
+    Model("gemini#2", "gemini-3.1-flash-lite", vision=True, daily=500),
     Model("groq", "qwen/qwen3.8-27b", vision=True, fast=2, daily=1000),
     Model("groq", "openai/gpt-oss-120b", vision=False, effort="low", fast=1, daily=1000),
 ]
