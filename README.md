@@ -240,6 +240,24 @@ recording. Nothing is kept: each half-hour recording is deleted once checked.
 Both smart watches run fully offline on the phone. They need `ai-edge-litert` in the venv (see
 setup); the two models (~9 MB) are downloaded on first use and checked against pinned hashes.
 
+### Playing Hill Climb Racing
+
+`/play 30m` opens Hill Climb Racing and plays it by itself: it drives each run, closes the "Second
+chance" popup (reviving would play an ad), taps through the results and starts the next run, then
+messages a summary. `/stop` ends it early. It holds the screen the whole time, so tasks and commands
+wait or report busy. Maximum: 3 hours.
+
+It runs fully on the phone through the scrcpy server, not adb screenshots: ~30 frames a second at
+640x294 (decoded by ffmpeg, the newest frame ~20 ms old) and multi-touch injected over a socket, so it
+can hold the pedals down. The car is found by its red body; its tilt (the long axis of the red pixels)
+decides the pedals: gas, let go above 30° nose-up, brake above 50°, looking 0.25 s ahead.
+
+Menus are tapped only when the screen matches a saved picture of that exact button (`hillclimb_ui/`)
+and the game is the app in front. Anything else (offers, ads, store pages) is never tapped; after 20 s
+on one it stops and tells you. If another app comes to the front (the screen turns portrait), it
+stops at once. The pictures and positions are for a 2340x1080 screen; on another phone the screens
+won't match and it stops without tapping.
+
 ### Free tier limits (October 2026)
 
 | Model | Per minute | Tokens / min | Per day |
@@ -320,6 +338,10 @@ m34-agent/
 │   ├── store.py               memory notes, scheduled tasks, shortcuts
 │   ├── watch.py               camera watch (clips + frame comparison) and sound watch
 │   ├── detect.py              on-device sound and person recognition (YAMNet, EfficientDet)
+│   ├── game.py                /play: runs the Hill Climb Racing autopilot in the background
+│   ├── hillclimb.py           the autopilot: reads the screen, drives, taps through menus
+│   ├── hillclimb_ui/          saved button pictures the autopilot recognises screens by
+│   ├── scrcpy.py              live screen frames and touch input through the scrcpy server
 │   ├── web.py                 web search + page reading (public addresses only)
 │   └── config.example.json    bot token + API keys template
 ├── debian/
@@ -434,9 +456,12 @@ and **[termux]** `pkg install -y termux-api`.
 ```sh
 proot-distro install debian
 proot-distro login debian -- bash -c \
-  "apt update && apt install -y python3 python3-pil python3-venv adb ffmpeg && useradd -m -s /bin/bash agent"
+  "apt update && apt install -y python3 python3-pil python3-venv adb ffmpeg curl && useradd -m -s /bin/bash agent"
 proot-distro login debian --user agent -- bash -c \
-  "python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install uiautomator2 ai-edge-litert"
+  "python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install uiautomator2 ai-edge-litert numpy"
+proot-distro login debian --user agent -- bash -c \
+  "mkdir -p ~/.cache/tg-bridge && curl -fL -o ~/.cache/tg-bridge/scrcpy-server \
+   https://github.com/Genymobile/scrcpy/releases/download/v4.1/scrcpy-server-v4.1"   # only for /play
 
 ROOTFS=$PREFIX/var/lib/proot-distro/containers/debian/rootfs
 [ -d "$ROOTFS" ] || ROOTFS=$PREFIX/var/lib/proot-distro/installed-rootfs/debian   # older proot-distro
@@ -446,7 +471,7 @@ mkdir -p $ROOTFS/home/agent/.android $ROOTFS/home/agent/bridge $ROOTFS/home/agen
 cp ~/.android/adbkey ~/.android/adbkey.pub $ROOTFS/home/agent/.android/   # reuse the approved adb key
 cp $SRC/debian/phone $ROOTFS/usr/local/bin/phone && chmod 755 $ROOTFS/usr/local/bin/phone
 cp $SRC/debian/resolv.conf $ROOTFS/etc/resolv.conf                          # 1s DNS retries
-cp $SRC/bridge/*.py $ROOTFS/home/agent/bridge/   # or clone the repo instead: see "Updating the code"
+cp -r $SRC/bridge/*.py $SRC/bridge/hillclimb_ui $ROOTFS/home/agent/bridge/   # or clone the repo: see "Updating the code"
 cp $SRC/bridge/config.example.json $ROOTFS/home/agent/.config/tg-bridge/config.json
 proot-distro login debian -- bash -c \
   "chown -R agent:agent /home/agent && chmod 600 /home/agent/.config/tg-bridge/config.json /home/agent/.android/adbkey"
@@ -529,7 +554,8 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 | `/usage` | Table of AI requests per model against the free daily limits (Groq's own numbers), and which models are paused |
 | `/watch 10m [front\|back] [people]`, `/unwatch` | message me with a clip if anything moves (or only when someone enters); stop watching |
 | `/listen 8h [cry\|scream\|dog\|alarm\|glass\|door]`, `/unlisten` | message me with a recording when I hear the sound (default `cry`); stop listening |
-| `/stop` | stop the task and clear the queue |
+| `/play 30m` | play Hill Climb Racing by itself, then message a summary; `/stop` ends it |
+| `/stop` | stop the task, watches and game, and clear the queue |
 | `/new` | forget the conversation (memory notes stay) |
 
 Examples: *"record a 10 second video from the front camera and send it"*,

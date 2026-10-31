@@ -16,6 +16,7 @@ from typing import Any, Callable
 from agent import Agent, Router
 from commands import QuickCommands, format_telegram, parse_duration, plain
 from device import Device, adb, getprop, is_temporary, ready_to_send
+from game import Game
 from net import ConnectionPool
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
 from updater import current_version, self_update
@@ -59,6 +60,7 @@ BUILT_IN_COMMANDS = [  # (command, description) shown in /help and Telegram's co
     ("unwatch", "Stop the camera watch"),
     ("listen", f"Message me if I hear a sound: /listen 8h [{'|'.join(SOUNDS)}]"),
     ("unlisten", "Stop the sound watch"),
+    ("play", "Play Hill Climb Racing by itself: /play 30m (/stop ends it)"),
     ("new", "Forget the conversation and start fresh"),
     ("stop", "Stop the current task and clear the queue"),
     ("update", "Pull the latest code from GitHub and restart"),
@@ -223,6 +225,7 @@ class Bridge:
         send_file = lambda path, caption: self.tg.send_file(self.owner, path, caption)
         self.watch = MotionWatch(self.device, self.device_lock, self.notify, send_file)
         self.listener = SoundWatch(self.device, self.notify, send_file)
+        self.game = Game(self.device, self.device_lock, self.notify, send_file)
         self.memory = Memory()
         self.usage = Usage()
         self.schedules = Schedules(getprop("persist.sys.timezone") or "UTC")
@@ -310,7 +313,7 @@ class Bridge:
 
         def run() -> None:
             if command.changes_device and not self.device_lock.acquire(blocking=False):
-                self.tg.send(self.owner, "Busy: a task or motion watch is using the phone. Wait, or /stop it.")
+                self.tg.send(self.owner, "Busy: a task, motion watch or game is using the phone. Wait, or /stop it.")
                 return
             start = time.time()
             try:
@@ -414,6 +417,8 @@ class Bridge:
             self.tg.send(self.owner, self.start_listening(text.partition(" ")[2]))
         elif text == "/unlisten":
             self.tg.send(self.owner, self.listener.stop())
+        elif text.split()[0] == "/play":
+            self.tg.send(self.owner, self.start_game(text.partition(" ")[2]))
         elif text == "/stop":
             self.stop()
         elif text == "/update":
@@ -444,7 +449,7 @@ class Bridge:
 
     def status(self) -> str:
         queued = self.tasks.qsize()
-        watching = "".join(f"\n{w.name.capitalize()}: {w.summary}." for w in (self.watch, self.listener) if w.active)
+        watching = "".join(f"\n{w.name.capitalize()}: {w.summary}." for w in (self.watch, self.listener, self.game) if w.active)
         if not self.busy:
             return (f"Idle. {queued} queued." if queued else "Idle.") + watching
         last = self.actions[-1] if self.actions else "thinking"
@@ -541,8 +546,8 @@ class Bridge:
 
     def update(self) -> None:
         def run() -> None:
-            if self.busy or self.watch.active or self.listener.active:
-                self.tg.send(self.owner, "Busy (a task or watch is running). Send /update again when idle.")
+            if self.busy or self.watch.active or self.listener.active or self.game.active:
+                self.tg.send(self.owner, "Busy (a task, watch or game is running). Send /update again when idle.")
                 return
             try:
                 result = self_update(REPO_DIR)
@@ -577,8 +582,14 @@ class Bridge:
             return f"Usage: /listen 8h [{'|'.join(SOUNDS)}]  (30m, 8h; a plain number means minutes)"
         return self.listener.start(seconds, sound)
 
+    def start_game(self, args: str) -> str:
+        seconds = parse_duration(args or "30m", 60)
+        if not seconds:
+            return "Usage: /play 30m  (10m, 1h; a plain number means minutes)"
+        return self.game.start(seconds)
+
     def stop(self) -> None:
-        for watch in (self.watch, self.listener):
+        for watch in (self.watch, self.listener, self.game):
             if watch.active:
                 watch.stop()
         while not self.tasks.empty():
