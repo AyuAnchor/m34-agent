@@ -58,12 +58,13 @@ SCREEN_TOOLS = {
 }
 DEVICE_WAIT_S = 60  # a watch clip or quick command finishes well within this
 SHOWS_SCREEN_AFTER = {"tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url"}
+NAVIGATION = {"open_app", "open_settings", "open_url"}
 SCREEN_MARKER = "Elements on screen"
 ELEMENT_LINE = re.compile(r"^\[\d+\] (.*?)(?: #\S+)?(?: (?:checked|unchecked|selected|focused)\b.*)?$")
 MAX_OLD_SCREEN = 1500
 REFUSAL = re.compile(r"\b(I(?:'|’)?m sorry|I can(?:'|’)?t|I cannot|I(?:'|’)?m (?:not able|unable)|I won(?:'|’)?t)\b", re.IGNORECASE)
 SCHEDULED_PREFIX = re.compile(r"^\[Scheduled #\d+\]\s*")
-TAPPED = re.compile(r"^(?:Tapped|Long-pressed) \[\d+\] (.+?)\.$", re.MULTILINE)
+TAPPED = re.compile(r'^(?:Tapped|Long-pressed) (?:\[\d+\] (.+?)|"(.+?)")\.$', re.MULTILINE)
 # Never saved into shortcuts: read-only, and anything sensitive or personal.
 SHORTCUT_SKIP = {
     "look", "phone_status", "list_schedules", "remember", "forget", "schedule_task", "cancel_schedule",
@@ -124,6 +125,9 @@ numbers change after every action.
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
 settings status, calls, messages, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
+- To search YouTube, the Play Store or Maps, open_url their search link (it opens in the app, one step \
+instead of tapping and typing): https://www.youtube.com/results?search_query=WORDS, \
+https://play.google.com/store/search?q=WORDS&c=apps, https://www.google.com/maps/search/?api=1&query=WORDS.
 - To play, pause or skip whatever is playing (video or music, in any app), press the play_pause, \
 next_track or previous_track key. Do not tap on-screen playback controls: they auto-hide after a few \
 seconds, so tapping them is unreliable.
@@ -187,8 +191,12 @@ TOOLS = [
     ),
     function(
         "type_text",
-        "Type into the focused field.",
-        {"text": prop("string", "ASCII"), "submit": prop("boolean", "press Enter after")},
+        "Type into the focused field (tap it first). Any language and emoji.",
+        {
+            "text": prop("string"),
+            "submit": prop("boolean", "press Enter after"),
+            "clear": prop("boolean", "replace what's in the field instead of adding to it"),
+        },
         ("text",),
     ),
     function(
@@ -241,7 +249,13 @@ TOOLS = [
         {"seconds": prop("integer"), "label": prop("string")},
         ("seconds",),
     ),
-    function("open_url", "Open a link in the browser.", {"url": prop("string")}, ("url",)),
+    function(
+        "open_url",
+        "Open a link, in its app if one handles it. YouTube, Play Store and Maps links open there directly: "
+        "quicker than searching inside the app.",
+        {"url": prop("string"), "browser": prop("boolean", "open in Chrome even if an app handles the link")},
+        ("url",),
+    ),
     function(
         "set_volume",
         "Set a volume level.",
@@ -861,7 +875,8 @@ def shortcut_step(call: dict[str, Any], result: str) -> tuple[str, dict[str, Any
     if name in SHORTCUT_SKIP or result.startswith(FAILED_RESULTS):
         return None
     if name == "tap" and (match := TAPPED.match(result)):
-        return f'tap "{match[1]}"', {"name": "tap", "args": {"text": match[1]}}
+        label = match[1] or match[2]
+        return f'tap "{label}"', {"name": "tap", "args": {"text": label}}
     try:
         args = json.loads(call["function"].get("arguments") or "{}")
     except json.JSONDecodeError:
@@ -932,7 +947,7 @@ class Agent:
                 as_int(a.get("hour")) or 0, as_int(a.get("minute")) or 0, str(a.get("label", ""))
             ),
             "set_timer": lambda a, m: self.device.set_timer(as_int(a.get("seconds")) or 60, str(a.get("label", ""))),
-            "open_url": lambda a, m: self.device.open_url(str(a.get("url", ""))),
+            "open_url": lambda a, m: self.device.open_url(str(a.get("url", "")), as_bool(a.get("browser"))),
             "set_volume": lambda a, m: self.device.set_volume(
                 as_int(a.get("percent")) or 0, str(a.get("stream") or "media")
             ),
@@ -955,7 +970,9 @@ class Agent:
                     str(a.get("to", "")), str(a.get("subject", "")), str(a.get("body", ""))
                 ),
             ),
-            "type_text": lambda a, m: self.device.type_text(str(a.get("text", "")), as_bool(a.get("submit"))),
+            "type_text": lambda a, m: self.device.type_text(
+                str(a.get("text", "")), as_bool(a.get("submit")), as_bool(a.get("clear"))
+            ),
             "scroll": lambda a, m: self.device.scroll(str(a.get("direction", ""))),
             "key": lambda a, m: self.device.key(str(a.get("name", ""))),
             "open_app": lambda a, m: self.device.open_app(str(a.get("name", ""))),
@@ -1054,8 +1071,21 @@ class Agent:
             recent = (recent + [signature])[-LOOP_WINDOW:]
             images, first_result = [], len(messages)
             last_move = max((n for n, c in enumerate(calls) if c["function"]["name"] in SHOWS_SCREEN_AFTER), default=-1)
+            skip = ""
             for number, call in enumerate(calls):
-                result, image = self.execute(call, model, show_screen=number == last_move)
+                name = call["function"]["name"]
+                if skip and name in SHOWS_SCREEN_AFTER:
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": skip})
+                    continue
+                navigates = name in NAVIGATION and number < last_move
+                result, image = self.execute(call, model, show_screen=number == last_move or navigates)
+                failed = name in SHOWS_SCREEN_AFTER and result.startswith(FAILED_RESULTS)
+                if number < last_move and not skip and (navigates or failed):
+                    # The rest of the batch was planned on the screen before this call.
+                    skip = "Skipped: the screen changed or an earlier action failed. Check the new screen first."
+                    if failed and self.claim_device():
+                        screen, image = self.device.look()
+                        result = f"{result}\n\n{screen}"
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
                 if image:
                     images.append(image)

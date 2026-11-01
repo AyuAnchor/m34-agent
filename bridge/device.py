@@ -39,6 +39,19 @@ MIN_LABELED = 3  # fewer labeled elements than this and the AI gets a screenshot
 WIRELESS_DEBUG_PROMPT = "Allow wireless debugging on this network?"
 STABLE_TIMEOUT_S = 2.5
 TEXT_WAIT_S = 1.5  # a tap by text waits this long for its text to show up
+EDIT_TEXT = "android.widget.EditText"  # also what Chrome reports for a web page's text inputs
+WEB_VIEW = ("android.webkit.WebView", "Web View")  # class, and the description of Chrome's page area
+PAGE_WAIT_S = 5  # uncached pages showed up after ~1.5-2 s
+VIEW = "android.intent.action.VIEW"
+BROWSABLE = "android.intent.category.BROWSABLE"
+BROWSER = "com.android.chrome"
+# Shown when an app opens: a link that does the common job in one step instead of tapping through the app.
+APP_CARDS = {
+    "com.google.android.youtube": "a search needs open_url https://www.youtube.com/results?search_query=WORDS",
+    "com.google.android.apps.youtube.music": "a search needs open_url https://music.youtube.com/search?q=WORDS",
+    "com.android.vending": "an app's page needs open_url https://play.google.com/store/apps/details?id=PACKAGE",
+    "com.google.android.apps.maps": "directions need open_url https://www.google.com/maps/dir/?api=1&destination=PLACE",
+}
 MAX_VIDEO_S = 30
 MAX_AUDIO_S = 120
 SAVE_WAIT_S = 12
@@ -319,6 +332,11 @@ def contains(outer: tuple[int, int, int, int], inner: list[int]) -> bool:
     return outer[0] <= inner[0] and outer[1] <= inner[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
 
 
+def area(node: ET.Element) -> int:
+    bounds = [int(n) for n in re.findall(r"\d+", node.get("bounds", ""))]
+    return (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]) if len(bounds) == 4 else 0
+
+
 def node_label(node: ET.Element) -> str:
     """A node's own text, or the first text inside it (clickable rows often hold their label in a child)."""
     for child in node.iter("node"):
@@ -333,6 +351,8 @@ class Device:
 
     def __init__(self) -> None:
         self.elements: list[Element] = []
+        self.changed = False  # something was done since the last look, so the numbered elements may have moved
+        self.empty_web_page = False
         self.automator = None
         self.apps: dict[str, str] = {}  # package -> its launcher component
         self._specs = ""
@@ -387,6 +407,14 @@ class Device:
             self.width, self.height = (long, short) if rotation in ("1", "3") else (short, long)
         elements: list[Element] = []
         seen = set()
+        # Chrome shows an empty "Web View" while a page loads (~0.5-1.5 s) and sometimes keeps it (seen on
+        # sign-in pages): the list then holds only Chrome's toolbar, so the screenshot has to describe the page.
+        self.empty_web_page = any(
+            len(node) == 0
+            and (node.get("class") in WEB_VIEW or node.get("content-desc") in WEB_VIEW)
+            and area(node) > self.width * self.height / 4
+            for node in root.iter("node")
+        )
         for node in root.iter("node"):
             interactive = any(node.get(flag) == "true" for flag in ("clickable", "long-clickable", "checkable"))
             own_label = (node.get("text") or node.get("content-desc") or "").strip()
@@ -450,6 +478,7 @@ class Device:
         or when the list can't describe the screen (games, camera, icon-only buttons). A screenshot about
         doubles the AI's answer time, and most screens read fine as a list."""
         self.elements = self.read_stable_elements()
+        self.changed = False
         lines = [
             f"[{n}] {e.label or '(no label)'}{f' #{e.resource}' if e.resource else ''} {e.flags}".rstrip()
             for n, e in enumerate(self.elements, 1)
@@ -463,7 +492,7 @@ class Device:
     def unreadable(self) -> bool:
         """Too few labels on screen for the element list alone to describe it."""
         labeled = sum(1 for e in self.elements if e.label)
-        return labeled < MIN_LABELED or labeled < len(self.elements) / 2
+        return self.empty_web_page or labeled < MIN_LABELED or labeled < len(self.elements) / 2
 
     def mark(self, image: Image.Image) -> Image.Image:
         """Draw each element's number on the screenshot (Set-of-Mark), skipping full-screen containers."""
@@ -482,39 +511,51 @@ class Device:
             draw.text((x1 + 5, y1 + 2), tag, fill="white", font=font)
         return marked
 
-    def find_text(self, text: str) -> int | None:
-        """Number of the element whose label matches text exactly, else contains it as whole words
-        (so "Stop" never matches "Stopwatch"). Keeps reading for a moment while it's missing: the screen may
-        still be changing after the previous action."""
+    def find_text(self, text: str) -> Element | None:
+        """The element whose label matches text exactly, else contains it as whole words (so "Stop" never
+        matches "Stopwatch"). Keeps reading for a moment while it's missing: the screen may still be changing
+        after the previous action."""
         wanted = text.strip().lower()
         whole_words = re.compile(rf"(?<!\w){re.escape(wanted)}(?!\w)")
         deadline = time.time() + TEXT_WAIT_S
         while True:
-            self.elements = self.read_elements()
-            labels = [e.label.lower() for e in self.elements]
+            elements = self.read_elements()
             for matches in (
                 lambda label: label == wanted,
                 lambda label: whole_words.search(label) is not None,
             ):
-                for number, label in enumerate(labels, 1):
-                    if label and matches(label):
-                        return number
+                for element in elements:
+                    if element.label and matches(element.label.lower()):
+                        return element
             if time.time() > deadline:
                 return None
+
+    def relocate(self, target: Element) -> Element | None:
+        """Where an element from the last look is now, after other actions may have changed the screen: the
+        same label and id, closest to where it was. Unlabeled elements without an id can't be told apart."""
+        if not (target.label or target.resource):
+            return target
+        same = [e for e in self.read_elements() if (e.label, e.resource) == (target.label, target.resource)]
+        cx, cy = target.center
+        return min(same, key=lambda e: abs(e.center[0] - cx) + abs(e.center[1] - cy), default=None)
 
     def tap(
         self, element: int | None, x: float | None, y: float | None, hold_ms: int | None, text: str | None = None
     ) -> str:
         if text:
-            element = self.find_text(text)
-            if element is None:
+            target = self.find_text(text)
+            if target is None:
                 return f"No element with text {text!r} on screen. Call look to see what is there."
-        if element:
+            px, py = target.center
+            what = f'"{target.label}"'
+        elif element:
             if not 1 <= element <= len(self.elements):
                 return f"There is no element {element}. Call look to refresh the numbers."
             target = self.elements[element - 1]
-            px, py = target.center
             what = f"[{element}] {target.label or '(no label)'}"
+            if self.changed and (target := self.relocate(target)) is None:
+                return f"No element {what} on the screen any more (it changed after the last look). Not tapped."
+            px, py = target.center
         elif x is not None and y is not None:
             px, py = round(x / 1000 * self.width), round(y / 1000 * self.height)
             what = f"point ({x:.0f},{y:.0f}) on the 0-1000 scale"
@@ -529,6 +570,7 @@ class Device:
 
     def click(self, x: int, y: int) -> None:
         """Through the automation server when it's up (~0.15 s quicker: `input` starts a new process each time)."""
+        self.changed = True
         try:
             if automator := self.fast():
                 automator.click(x, y)
@@ -539,6 +581,7 @@ class Device:
         shell(f"input tap {x} {y}")
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, ms: int) -> None:
+        self.changed = True
         try:
             if automator := self.fast():
                 automator.swipe(x1, y1, x2, y2, duration=ms / 1000)
@@ -548,14 +591,41 @@ class Device:
             self.automator = None
         shell(f"input swipe {x1} {y1} {x2} {y2} {ms}")
 
-    def type_text(self, text: str, submit: bool) -> str:
-        if not text.isascii():
-            return "Only plain ASCII text can be typed with adb."
-        escaped = text.replace("'", "'\\''").replace(" ", "%s")
-        shell(f"input text '{escaped}'")
+    def focused_field(self):
+        """The text field that has the keyboard, or None (games, or nothing tapped yet)."""
+        try:
+            if (automator := self.fast()) and (field := automator(focused=True, className=EDIT_TEXT)).exists:
+                return field
+        except Exception as error:
+            log.warning(f"couldn't find the focused field: {error}")
+        return None
+
+    def type_text(self, text: str, submit: bool, clear: bool = False) -> str:
+        """Plain ASCII goes in through adb's `input text` (~0.2 s). Anything else (Hindi, emoji...) is pasted
+        into the focused field and checked afterwards (~1 s: each read of the field takes ~0.3-0.5 s)."""
+        self.changed = True
+        field = self.focused_field() if clear or not text.isascii() else None
+        if field is None and (clear or not text.isascii()):
+            return "Tap the text field first: there's no focused text field."
+        if not text.isascii() and field.info.get("password"):  # pasted text would stay in the clipboard history
+            return "This is a password field: only plain ASCII can be typed into it."
+        if clear:
+            field.clear_text()
+        done = f"{'Cleared the field and typed' if clear else 'Typed'} {text!r}"
+        if text.isascii():
+            escaped = text.replace("'", "'\\''").replace(" ", "%s")
+            shell(f"input text '{escaped}'")
+        else:
+            automator = self.fast()
+            automator.set_clipboard(text)
+            automator.jsonrpc.pasteClipboard()
+            shown = field.info.get("text") or ""  # field is a query, so this reads the field as it is now
+            if text not in shown:
+                done += f", but the field now shows {shown[:200]!r}: check it before going on"
         if submit:
             shell("input keyevent KEYCODE_ENTER")
-        return f"Typed {text!r}{' and pressed Enter' if submit else ''}."
+            done += " and pressed Enter"
+        return f"{done}."
 
     def scroll(self, direction: str) -> str:
         cx, top, bottom = self.width // 2, int(self.height * 0.3), int(self.height * 0.7)
@@ -644,6 +714,7 @@ class Device:
         code = KEYS.get(name.lower())
         if not code:
             return f"Unknown key. Use one of: {', '.join(KEYS)}."
+        self.changed = True
         shell(f"input keyevent {code}")
         time.sleep(ACTION_PAUSE_S)
         return f"Pressed {name}."
@@ -673,6 +744,7 @@ class Device:
 
     def open_settings(self, page: str, app: str = "") -> str:
         """Jump straight to a Settings page (or one app's info page) instead of tapping through menus."""
+        self.changed = True
         if page == "app":
             package = self.find_package(app) if app else None
             if package is None:
@@ -686,6 +758,7 @@ class Device:
         return f"Opened {page.replace('_', ' ')} settings."
 
     def open_app(self, name: str) -> str:
+        self.changed = True
         package = self.find_package(name)
         if package is None:
             return f"No app with a home-screen icon matches {name!r}. Try another name."
@@ -697,7 +770,8 @@ class Device:
         if not component or "Error" in output:
             shell(f"monkey -p {package} -c {LAUNCHER} 1")
             time.sleep(1.5)
-        return f"Opened {package}."
+        card = APP_CARDS.get(package)
+        return f"Opened {package} (only opened: {card})." if card else f"Opened {package}."
 
     def newest_camera_file(self) -> str:
         return shell(f"ls -t {CAMERA_DIR} 2>/dev/null | head -1")
@@ -809,12 +883,24 @@ class Device:
         start_activity("android.intent.action.SET_TIMER", extras)
         return f"Timer started for {seconds}s."
 
-    def open_url(self, url: str) -> str:
+    def open_url(self, url: str, browser: bool = False) -> str:
+        """In the app that handles the link (YouTube, Play Store, Maps...) unless browser is asked for. The
+        package is always named: with two handlers Android would show an "Open with" chooser instead."""
         if urlparse(url).scheme not in ("http", "https"):
             return "Only http and https links can be opened."
-        start_activity("android.intent.action.VIEW", data=url)
-        time.sleep(2)
-        return f"Opened {url}."
+        self.changed = True
+        handlers = shell(f"cmd package query-activities --brief -a {VIEW} -c {BROWSABLE} -d {shlex.quote(url)}")
+        packages = [line.strip().split("/")[0] for line in handlers.splitlines() if "/" in line]
+        app = None if browser else next((p for p in packages if p != BROWSER), None)
+        package = app or (BROWSER if BROWSER in packages else None)
+        before = self.read_elements()
+        start_activity(VIEW, f" -p {package}" if package else "", data=url)
+        deadline = time.time() + PAGE_WAIT_S
+        while time.time() < deadline:  # the old screen stays up for ~0.5 s, then Chrome's empty page
+            elements = self.read_elements()
+            if elements and elements != before and not self.empty_web_page:
+                break
+        return f"Opened {url} in {app}." if app else f"Opened {url}."
 
     def status(self) -> str:
         """Volumes, brightness, display, connectivity and battery in one adb call (~0.7 s), so the AI doesn't dig

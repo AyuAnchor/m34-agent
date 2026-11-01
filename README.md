@@ -65,13 +65,15 @@ service, so the agent controls the phone like a computer would, without touching
 |---|---|
 | `look` | Numbered list of on-screen elements + a screenshot with the numbers drawn on |
 | `tap` | Tap by visible text, by element number, or a point on a 0-1000 scale; optional long press |
-| `type_text`, `key`, `scroll` | Type, press back/home/enter/media play-pause/next/previous/..., scroll up/down/left/right |
+| `type_text` | Type into the focused field, any language and emoji; optionally replace what's there and press Enter |
+| `key`, `scroll` | Press back/home/enter/media play-pause/next/previous/..., scroll up/down/left/right |
 | `open_app` | Open an app by name ("camera", "chrome", "Hill Climb Racing"); only apps with a home-screen icon |
+| `open_url` | Open a link in the app that handles it (YouTube, Play Store, Maps), else Chrome |
 | `wait` | Pause up to 2 minutes |
 | `take_photo`, `record_video` | Use the camera app (front or back), returns the file path |
 | `record_audio` | Record from the microphone only (Termux:API), up to 2 minutes |
 | `set_alarm`, `set_timer` | Direct to the clock app (needs a clock app installed) |
-| `open_url`, `set_volume`, `set_brightness` | Direct actions, no tapping through settings |
+| `set_volume`, `set_brightness` | Direct actions, no tapping through settings |
 | `open_settings` | Jump straight to a Settings page (display, sound, battery, apps, one app's info page...) instead of tapping through menus |
 | `phone_status` | Volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb, battery, storage, RAM and chipset in one step |
 | `speak` | Say something out loud through the phone's speaker |
@@ -97,6 +99,25 @@ automatically, so the AI doesn't spend a separate round trip on `look` (about ha
 The screen is read only once it's stable (two identical reads in a row, ~250 ms each), so a page that's still
 animating isn't mistaken for "my tap did nothing". When the AI sends several actions at once, the
 screen is read once, after the last one, and a tap by text waits up to 1.5 s for its text to appear.
+
+Those actions were all planned on one screen, so the batch is checked as it runs:
+
+- A tap by number after an earlier action finds its element again (same label and id) and taps it where
+  it is now, or refuses if it's gone, instead of hitting whatever moved into its place.
+- Opening an app, link or Settings page, or a failed screen action, skips the rest of the batch and
+  shows the new screen.
+
+`open_url` waits for the page instead of a fixed 2 s pause (~1-1.6 s for an uncached page, all of it
+read). While loading, Chrome shows an empty "Web View" for 0.5-1.5 s, which would otherwise pass as a
+stable screen; a page that stays like that gets a screenshot. Search links for YouTube, the Play Store and
+Maps open straight in the app (one step instead of tapping, typing and submitting: ~7 s instead of ~11 s
+for a YouTube search). The package is always named, since with two handlers Android shows an "Open with"
+chooser.
+
+Plain ASCII is typed with adb's `input text` (~0.3 s). Other text (Hindi, emoji...) is pasted into the
+focused field and the field is read back (~1.5 s); if it doesn't hold the text (Chrome's address bar
+drops a pasted leading space), the AI is told what it shows. Password fields only take ASCII, so a
+password never lands in the keyboard's clipboard history.
 
 That automatic screen comes with a screenshot only when the element list is too sparse to go by
 (fewer than 3 labels, or mostly unlabeled: games, the camera, icon-only buttons). A screenshot
