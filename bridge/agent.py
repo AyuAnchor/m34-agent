@@ -37,9 +37,9 @@ MODEL_TIMEOUT_S = 40  # give up and try the next model; healthy answers take und
 SLOW_ANSWER_S = 25  # an answer slower than this sets the model aside for a while
 SLOW_COOLDOWN_S = 300
 MAX_SLOW_WAIT_S = 3600
-# No answer yet after this long: ask the next model too and take whichever answers first. Most answers
-# take 1-5 s, and a request that hangs would otherwise cost the full MODEL_TIMEOUT_S.
-HEDGE_S = 8
+# No answer yet after this long: ask the next model too and take whichever answers first. Flash Lite,
+# which does most steps, answered 9 in 10 within 4.8 s (log, late October); the rest took 10-38 s.
+HEDGE_S = 5
 MAX_PARALLEL = 3
 SHORT_LIMIT_WAIT_S = 20  # every model cooling down, but one is back within this: wait rather than give up
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -631,12 +631,14 @@ class Router:
 
         def start() -> bool:
             """Ask the next model that isn't cooling down or already asked. Not the same model as one still
-            thinking (on another key it's likely just as slow), and models set aside as slow come last."""
+            thinking (on another key it's likely just as slow), and models set aside as slow come last. A
+            backup goes to another provider first: slowness and 503s hit a provider's models together."""
             nonlocal skipped
             now = time.time()
             busy = {model.name for model, _ in running.values()}
+            families = {model.family for model, _ in running.values()}
             ready = [m for m in order if m.cooldown_until <= now and m.name not in busy]
-            ready.sort(key=lambda m: m.slow_until > now)
+            ready.sort(key=lambda m: (m.slow_until > now, m.family in families))
             if not ready:
                 return False
             model = ready[0]

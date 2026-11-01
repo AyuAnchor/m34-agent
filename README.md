@@ -223,8 +223,10 @@ comes back quickly. Server errors and network failures back off 1, 2, 4... minut
 busy spell doesn't bounce the task between models. A used-up **daily** quota is retried hourly.
 
 **Slow answers.** Most answers take 1-5 s, but an overloaded model sometimes sends nothing until the
-40 s timeout. So when a model hasn't answered within 8 s, the next one (a different model) is asked
-too and the first answer wins, up to 3 at once. A model that loses this race, or takes over 25 s,
+40 s timeout. So when a model hasn't answered within 5 s, another model is asked too and the first
+answer wins, up to 3 at once. That backup comes from another provider when one is free, since
+overload and 503s hit all of a provider's models together (usually NVIDIA's Nemotron backs up Gemini;
+Groq's 8K tokens a minute rarely fits a ~4-6K token step). A model that loses this race, or takes over 25 s,
 is asked only after the others for 5 minutes, doubling while it stays slow (up to an hour). If every
 model is briefly rate-limited (back within 20 s), the bot waits rather than giving up.
 
