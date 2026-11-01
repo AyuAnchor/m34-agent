@@ -48,6 +48,7 @@ Tested on Galaxy M34, Android 16 (One UI 8.5), Termux 0.118.3, Shizuku 13.6.0.
 | **device.py** | Debian, user `agent` | Phone actions: numbered screen elements, taps, typing, apps, camera, files |
 | **store.py** | Debian, user `agent` | Memory notes and scheduled tasks (small JSON files) |
 | **commands.py** | Debian, user `agent` | Instant `/commands` that call device actions directly, no AI |
+| **speech.py** | Debian, user `agent` | Voice notes to text (Groq Whisper) |
 | **phone** | Debian | `adb` pointed at the phone itself (`127.0.0.1:5555`) |
 | **runit** | Termux | Keeps the bridge running, restarts it if it crashes |
 | **Termux:Boot** | Android app | Starts everything after a reboot |
@@ -135,6 +136,15 @@ If the same action comes up 3 times in the last 6 steps (repeats or back-and-for
 is told it's going in circles and to change approach. Taps less than ~25 apart on the 0-1000 scale
 count as the same tap. If it starts repeating again after that warning, the task stops and says
 which action it kept repeating.
+
+Before the reply to a task that used the screen goes out, a second model checks it: it gets the
+request, the actions taken, the reply and a fresh read of the screen, and answers OK or names a claim
+that no action did and the screen doesn't show ("searched for lofi hindi songs" after only opening
+YouTube). The agent is then told to finish the task or say what didn't happen; a second failed check
+lets the reply through. The check costs ~0.8 s and uses no tools, so the request stays small. Gemini 3.5
+Flash Lite does it: it was right on all 18 test cases (true and false claims, both keys). gpt-oss missed a
+claimed settings change, and Qwen called a results page that was still loading a failed search. Runs
+whose last check failed aren't saved as shortcuts.
 
 ### Fast screen reading
 
@@ -321,6 +331,7 @@ won't match and it stops without tapping.
 | NVIDIA (all models together) | up to 40 | - | ~10,000 |
 | Groq `openai/gpt-oss-120b` | ~30 | 8K | 1,000 |
 | Groq `qwen/qwen3.8-27b` | ~30 | 8K (7K input) | 1,000 |
+| Groq `whisper-large-v3` (voice notes) | 20 | - | 2,000 (8 h of audio) |
 
 Every agent step is one request, so the three Gemini Flash models cover only a few phone tasks a
 day; the Flash Lite models do most of the work. Gemini limits are per Google Cloud project and reset at
@@ -389,6 +400,7 @@ m34-agent/
 │   ├── device.py              phone actions: numbered elements, taps, apps, camera, files
 │   ├── commands.py            instant /commands that skip the AI
 │   ├── net.py                 shared HTTPS connection pool (IPv4 first, kept warm)
+│   ├── speech.py              voice notes to text (Groq Whisper)
 │   ├── store.py               memory notes, scheduled tasks, shortcuts
 │   ├── watch.py               camera watch (clips + frame comparison) and sound watch
 │   ├── detect.py              on-device sound and person recognition (YAMNet, EfficientDet)
@@ -602,6 +614,8 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 | Message | Result |
 |---|---|
 | any task in plain words | the agent does it and replies |
+| a voice note | transcribed (any language), shown back as "Heard: ...", then run as a task |
+| a photo, video or file | saved on the phone in `Download/Telegram`; its caption, if any, becomes a task about it |
 | `/status` | current task, time, steps, model, queue |
 | `/screen` | instant screenshot, no AI involved |
 | `/memory`, `/forget N` | see memory notes, delete note N |
@@ -616,6 +630,15 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 
 Examples: *"record a 10 second video from the front camera and send it"*,
 *"remember that my name is Ayush"*, *"every day at 9:00 send me the battery level"*.
+
+**Voice notes** go to Groq's `whisper-large-v3` with the Groq key the models already use (~0.3-0.5 s for
+a short note). It was as fast as the turbo model in testing, and heard "सात बजे" as "7 बजे" where turbo
+heard "साथ बजे" ("with o'clock"). The transcript is sent back so you can see what it understood.
+
+**Files** you send (up to 20 MB, Telegram's limit for bots) land in `/sdcard/Download/Telegram`, renamed
+if the name is taken, and photos and videos are indexed so Gallery shows them. With a caption ("set this as
+the wallpaper") the caption becomes a task that knows where the file is, and a photo or image is also shown
+to the AI. Without one you get "Saved on the phone: ...", and your next task is told about the file.
 
 Tasks that use the phone show one live **progress message** that updates with every step. It
 appears with the first action, so plain chat ("hi") just gets the reply, about 0.4 s sooner.

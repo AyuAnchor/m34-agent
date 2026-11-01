@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Telegram bridge: the owner's messages become tasks for the phone agent."""
+import base64
 import html
 import json
 import logging
 import logging.handlers
 import os
 import queue
+import re
 import secrets
 import threading
 import time
@@ -17,7 +19,8 @@ from agent import Agent, Router
 from commands import QuickCommands, format_telegram, parse_duration, plain
 from device import Device, adb, getprop, is_temporary, ready_to_send
 from game import Game
-from net import ConnectionPool
+from net import ConnectionPool, multipart
+from speech import Transcriber
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
 from updater import current_version, self_update
 from watch import SOUNDS, MotionWatch, SoundWatch
@@ -44,6 +47,14 @@ BATTERY_LOW = 15  # alert below this %
 BATTERY_REARM = 20  # ...and alert again only after it has been back at or above this %
 OWNER_SCREEN_PATH = Path("/tmp/owner-screen.jpg")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
+MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # bots can't download bigger files from Telegram
+RECEIVED_DIR = STATE_DIR / "received"  # files from the owner, on their way to the phone
+ATTACHMENTS = ("voice", "photo", "video", "video_note", "audio", "document")  # "photo" is a list of sizes
+VIEWABLE_IMAGES = ("image/jpeg", "image/png", "image/webp")  # sent with a request, the AI sees these too
+MAX_VIEWED_BYTES = 4 * 1024 * 1024
+FILE_NAMES = {"photo": "photo_{:%Y%m%d_%H%M%S}.jpg", "video": "video_{:%Y%m%d_%H%M%S}.mp4",
+              "video_note": "video_{:%Y%m%d_%H%M%S}.mp4", "audio": "audio_{:%Y%m%d_%H%M%S}.mp3",
+              "document": "file_{:%Y%m%d_%H%M%S}"}
 UPLOAD_KINDS = {  # file suffix -> (Bot API method, form field)
     **dict.fromkeys((".jpg", ".jpeg", ".png", ".webp"), ("sendPhoto", "photo")),
     **dict.fromkeys((".mp4", ".mov", ".3gp", ".mkv"), ("sendVideo", "video")),
@@ -146,20 +157,16 @@ class Telegram:
         if path.stat().st_size > MAX_UPLOAD_BYTES:
             raise ValueError(f"{path.name} is over Telegram's 50 MB bot upload limit.")
         method, field_name = UPLOAD_KINDS.get(path.suffix.lower(), ("sendDocument", "document"))
-        boundary = secrets.token_hex(16)
+        fields = {"chat_id": str(chat_id), "caption": caption[:1000]}
+        body, content_type = multipart(fields, field_name, path.name, path.read_bytes())
+        self.post(method, body, content_type, 300)
 
-        def field(name: str, value: str) -> bytes:
-            return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
-
-        body = (
-            field("chat_id", str(chat_id))
-            + field("caption", caption[:1000])
-            + f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}"; filename="{path.name}"\r\n'
-              f"Content-Type: application/octet-stream\r\n\r\n".encode()
-            + path.read_bytes()
-            + f"\r\n--{boundary}--\r\n".encode()
-        )
-        self.post(method, body, f"multipart/form-data; boundary={boundary}", 300)
+    def download(self, file_id: str) -> bytes:
+        file_path = self.call("getFile", file_id=file_id)["file_path"]
+        status, _, data = self.pool.request(f"/file{self.path}/{file_path}", None, {}, 300, method="GET")
+        if status != 200:
+            raise RuntimeError(f"download failed (HTTP {status})")
+        return data
 
 
 class Draft:
@@ -206,7 +213,11 @@ class Bridge:
         self.tg = Telegram(self.config["token"])
         self.owner: int | None = self.config.get("owner_id")
         self.pair_code = None if self.owner else secrets.token_hex(3)
-        self.tasks: queue.Queue[tuple[str, float]] = queue.Queue()  # (task, when the owner sent it)
+        # (task, when the owner sent it, photos to show the AI as data URLs)
+        self.tasks: queue.Queue[tuple[str, float, list[str]]] = queue.Queue()
+        self.received: list[str] = []  # notes on files the owner sent without a request, for the next task
+        groq_key = self.config.get("providers", {}).get("groq")
+        self.transcribe = Transcriber(groq_key) if groq_key else None
         self.busy = False
         self.cancel = threading.Event()
         self.approvals: dict[str, tuple[threading.Event, list[bool]]] = {}
@@ -377,14 +388,17 @@ class Bridge:
             self.handle_callback(update["callback_query"])
             return
         message = update.get("message") or {}
-        text = (message.get("text") or "").strip()
+        text = (message.get("text") or message.get("caption") or "").strip()
+        kind = next((kind for kind in ATTACHMENTS if message.get(kind)), None)
         user_id = message.get("from", {}).get("id")
-        if not text or user_id is None or message.get("chat", {}).get("type") != "private":
+        if not (text or kind) or user_id is None or message.get("chat", {}).get("type") != "private":
             return
         if self.owner is None:
             self.try_pair(user_id, text)
         elif user_id != self.owner:
             log.warning(f"ignored message from user {user_id}")
+        elif kind:
+            threading.Thread(target=self.receive, args=(message, kind, text), daemon=True).start()
         elif text in ("/start", "/help"):
             self.tg.send(self.owner, self.help_text())
         elif text == "/status":
@@ -428,9 +442,58 @@ class Bridge:
         elif text.startswith("/"):  # a typo'd command shouldn't become an AI task
             self.tg.send(self.owner, "Unknown command. Send /help for the list.")
         else:
-            if self.busy or not self.tasks.empty():
-                self.tg.send(self.owner, "Still working on the previous task. Queued this one.")
-            self.tasks.put((text, message.get("date") or time.time()))
+            self.queue_task(text, message.get("date") or time.time())
+
+    def queue_task(self, text: str, sent_at: float, images: list[str] | None = None) -> None:
+        if self.busy or not self.tasks.empty():
+            self.tg.send(self.owner, "Still working on the previous task. Queued this one.")
+        self.tasks.put((text, sent_at, images or []))
+
+    def receive(self, message: dict[str, Any], kind: str, caption: str) -> None:
+        """A voice note becomes a task; any other file goes to the phone's Download/Telegram folder, and its
+        caption (if any) becomes a task about it. Runs on its own thread: downloads can take a while."""
+        sent_at = message.get("date") or time.time()
+        file = message[kind][-1] if kind == "photo" else message[kind]  # the largest photo size comes last
+        try:
+            if file.get("file_size", 0) > MAX_DOWNLOAD_BYTES:
+                self.tg.send(self.owner, "That's over 20 MB, the most a Telegram bot can download.")
+                return
+            if kind == "voice":
+                if self.transcribe is None:
+                    self.tg.send(self.owner, "Voice notes need a Groq API key (providers.groq in the config).")
+                    return
+                start = time.time()
+                heard = self.transcribe(self.tg.download(file["file_id"]), "voice.ogg")
+                log.info(f"voice note ({file.get('duration', '?')}s) transcribed in {time.time() - start:.1f}s")
+                if not heard:
+                    self.tg.send(self.owner, "I couldn't make out any words in that voice note.")
+                    return
+                self.tg.send(self.owner, f"Heard: {heard}")
+                self.queue_task(heard, sent_at)
+                return
+            data = self.tg.download(file["file_id"])
+            name = file.get("file_name") or FILE_NAMES[kind].format(datetime.fromtimestamp(sent_at))
+            name = re.sub(r"[^\w.\- ]+", "_", Path(name).name).strip() or "file"
+            RECEIVED_DIR.mkdir(exist_ok=True)
+            local = RECEIVED_DIR / name
+            local.write_bytes(data)
+            try:
+                path = self.device.receive(local)
+            finally:
+                local.unlink(missing_ok=True)
+            note = f"(The owner sent a {kind.replace('_', ' ')}, saved on the phone at {path}.)"
+            log.info(f"received a {kind} ({len(data) // 1024} KB) -> {path}")
+            if caption:
+                mime = "image/jpeg" if kind == "photo" else file.get("mime_type", "")
+                seen = mime in VIEWABLE_IMAGES and len(data) <= MAX_VIEWED_BYTES
+                images = [f"data:{mime};base64,{base64.b64encode(data).decode()}"] if seen else []
+                self.queue_task(f"{caption}\n\n{note}", sent_at, images)
+            else:
+                self.received.append(note)
+                self.tg.send(self.owner, f"Saved on the phone: {path}")
+        except Exception as error:
+            log.exception(f"couldn't receive a {kind}")
+            self.notify(f"Couldn't receive that {kind.replace('_', ' ')}: {error}")
 
     def try_pair(self, user_id: int, text: str) -> None:
         if text != f"/pair {self.pair_code}":
@@ -639,7 +702,7 @@ class Bridge:
 
     def work(self) -> None:
         while True:
-            task, sent_at = self.tasks.get()
+            task, sent_at, images = self.tasks.get()
             self.busy = True
             self.cancel.clear()
             self.task, self.started, self.actions, self.model = task, time.time(), [], ""
@@ -647,9 +710,11 @@ class Bridge:
             self.draft = Draft(self.tg, self.owner)
             try:
                 history = load_json(HISTORY_PATH, [])
-                reply = self.agent.run(history, task)
+                notes, self.received = self.received, []
+                prompt = "\n".join([*notes, task])
+                reply = self.agent.run(history, prompt, images)
                 self.draft.close()
-                history += [{"role": "user", "content": task}, {"role": "assistant", "content": reply}]
+                history += [{"role": "user", "content": prompt}, {"role": "assistant", "content": reply}]
                 save_json(HISTORY_PATH, history[-MAX_HISTORY:])
                 self.send_reply(reply)
                 log.info(f"replied {time.time() - self.started:.1f}s after starting, {len(self.actions)} actions")
@@ -762,7 +827,7 @@ class Bridge:
             try:
                 for item in self.schedules.pop_due():
                     log.info(f"scheduled task #{item['id']} is due")
-                    self.tasks.put((f"[Scheduled #{item['id']}] {item['task']}", time.time()))
+                    self.tasks.put((f"[Scheduled #{item['id']}] {item['task']}", time.time(), []))
             except Exception:
                 log.exception("scheduler failed")
 

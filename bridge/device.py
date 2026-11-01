@@ -33,6 +33,7 @@ ACTION_PAUSE_S = 0.3
 SCREEN_PATH = Path("/tmp/agent-screen.jpg")
 MEDIA_DIR = Path("/tmp/agent-media")
 CAMERA_DIR = "/sdcard/DCIM/Camera"
+RECEIVED_DIR = "/sdcard/Download/Telegram"
 SCREENSHOT_DIR = "/sdcard/DCIM/Screenshots"
 MAX_ELEMENTS = 80
 MIN_LABELED = 3  # fewer labeled elements than this and the AI gets a screenshot with the list
@@ -1019,6 +1020,20 @@ class Device:
                     found.append(f"{folder}/{name}")
         found.sort(key=lambda path: path.rsplit("/", 1)[-1], reverse=True)  # names start with the date
         return "\n".join(found[: max(1, min(count, 20))]) or f"No {kind} files found."
+
+    def receive(self, local: Path) -> str:
+        """Put a file from the owner in Download/Telegram, renamed if the name is taken, and have it indexed
+        so photos and videos show up in Gallery."""
+        path = f"{RECEIVED_DIR}/{local.name}"
+        number = 1
+        while shell(f"[ -e {shlex.quote(path)} ] && echo taken") == "taken":
+            path = f"{RECEIVED_DIR}/{local.stem}_{number}{local.suffix}"
+            number += 1
+        result = adb("push", str(local), path, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.decode(errors="replace").strip() or "adb push failed")
+        shell(f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {shlex.quote(f'file://{path}')}")
+        return path
 
     def fetch(self, path: str) -> Path:
         """Return a local copy of a file, pulling it from the phone's storage if needed."""

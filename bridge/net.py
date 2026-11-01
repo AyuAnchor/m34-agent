@@ -1,5 +1,6 @@
 """HTTPS plumbing shared by the Telegram and AI clients: IPv4 first, and reused connections."""
 import http.client
+import secrets
 import socket
 import threading
 import time
@@ -28,6 +29,17 @@ def cached_ipv4_first(*args: Any, **kwargs: Any) -> list[Any]:
 
 
 socket.getaddrinfo = cached_ipv4_first
+
+
+def multipart(fields: dict[str, str], file_field: str, filename: str, data: bytes) -> tuple[bytes, str]:
+    """A multipart/form-data body with text fields and one file, and its Content-Type."""
+    boundary = secrets.token_hex(16)
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode() for name, value in fields.items()]
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n".encode()
+    )
+    return b"".join(parts) + data + f"\r\n--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
 
 
 class ConnectionPool:
@@ -67,18 +79,19 @@ class ConnectionPool:
     def request(
         self,
         path: str,
-        body: bytes,
+        body: bytes | None,
         headers: dict[str, str],
         timeout: float,
         on_line: Callable[[bytes], None] | None = None,
+        method: str = "POST",
     ) -> tuple[int, Any, bytes]:
-        """POST and return (status, headers, body). Retries once if a kept-alive connection went stale.
+        """Send and return (status, headers, body). Retries once if a kept-alive connection went stale.
         With on_line, a successful response is handed over line by line as it arrives (body is then b"")."""
         for attempt in (1, 2):
             conn = self.acquire(timeout)
             streamed = False
             try:
-                conn.request("POST", path, body, headers)
+                conn.request(method, path, body, headers)
                 response = conn.getresponse()
                 if on_line and response.status == 200:
                     for line in response:

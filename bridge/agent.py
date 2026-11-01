@@ -72,6 +72,16 @@ SHORTCUT_SKIP = {
     "ask_owner",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs usually wandered; not worth replaying
+MAX_DONE_CHECKS = 2  # after a second failed check the reply goes out anyway (not saved as a route)
+DONE_CHECK_PROMPT = """You check a phone assistant's work before its reply goes to the owner. You get the \
+owner's request, every action the assistant took, its reply, and the phone's screen now. Go through each \
+thing the reply says was done: it counts only if one of the actions did it or the screen shows it. Opening \
+an app or a settings page is not doing anything in it: searching, typing, playing or switching a setting \
+needs its own action, or the screen showing the result. Answer in one line: OK if every claim is backed, \
+or WRONG: <the claim that isn't>."""
+# The only model right on every test case (~0.8 s): gpt-oss missed a claimed settings change, Qwen called a
+# still-loading results page a failed search.
+DONE_CHECKER = "gemini-flash-lite-latest"
 PREVIOUS_FILE = "<the file from the previous step>"
 SAVED_FILE = re.compile(r"(/(?:sdcard|storage|data)/\S+?\.\w+)(?=\.?(?:\s|$))")
 FAILED_RESULTS = (
@@ -605,12 +615,15 @@ class Router:
         messages: list[dict[str, Any]],
         fast_first: bool = False,
         on_text: Callable[[str], None] | None = None,
+        tools: bool = True,
+        prefer: str = "",
     ) -> tuple[dict[str, Any], Model]:
         """Ask the best available model. fast_first tries the quickest models first (a task's first step:
         plain chat ends there); later steps go to the smartest. A model with no answer after HEDGE_S gets
         company: the next model is asked too and the first answer wins. on_text receives a text answer as
-        it's written."""
+        it's written. prefer names a model to try (on any key) before the rest."""
         order = sorted(self.models, key=lambda m: (m.fast == 0, m.fast)) if fast_first else self.models
+        order = sorted(order, key=lambda m: m.name != prefer)
         running: dict[str, tuple[Model, float]] = {}  # label -> (model, when it was asked)
         outcomes: queue.Queue[tuple[Model, dict[str, Any] | None]] = queue.Queue()
         gate = TextGate(on_text) if on_text else None
@@ -629,7 +642,7 @@ class Router:
             model = ready[0]
             skipped = skipped or (not running and model is not order[0])
             running[model.label] = (model, now)
-            threading.Thread(target=self.attempt, args=(model, messages, gate, outcomes), daemon=True).start()
+            threading.Thread(target=self.attempt, args=(model, messages, gate, outcomes, tools), daemon=True).start()
             return True
 
         start()
@@ -672,20 +685,20 @@ class Router:
         raise NoModelAvailable("All models are rate-limited or failing right now. Try again later.")
 
     def attempt(
-        self, model: Model, messages: list[dict[str, Any]], gate: TextGate | None, outcomes: queue.Queue
+        self, model: Model, messages: list[dict[str, Any]], gate: TextGate | None, outcomes: queue.Queue, tools: bool
     ) -> None:
         """One model's try, on its own thread: puts (model, answer), or (model, None) once a failing model
         is on a cooldown."""
         message = None
         try:
             try:
-                message = self.call(model, messages, gate.writer(model) if gate else None)
+                message = self.call(model, messages, gate.writer(model) if gate else None, tools)
             except ProviderError as error:
                 if error.status != 400 or not model.effort:
                     raise
                 log.warning(f"{model.label} rejected reasoning_effort={model.effort}; sending without it")
                 model.effort = None  # this model doesn't take the thinking setting
-                message = self.call(model, messages, gate.writer(model) if gate else None)
+                message = self.call(model, messages, gate.writer(model) if gate else None, tools)
         except ProviderError as error:
             self.penalize(model, error.status, error.detail, retry_after(error.headers, error.detail))
         except TimeoutError as error:
@@ -731,9 +744,11 @@ class Router:
         return min(ongoing) if ongoing else None
 
     def call(
-        self, model: Model, messages: list[dict[str, Any]], on_text: Callable[[str], None] | None = None
+        self, model: Model, messages: list[dict[str, Any]], on_text: Callable[[str], None] | None = None, tools: bool = True
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"model": model.name, "messages": prepare(model, messages), "tools": TOOLS}
+        body: dict[str, Any] = {"model": model.name, "messages": prepare(model, messages)}
+        if tools:
+            body["tools"] = TOOLS
         streamed = StreamedReply(on_text) if on_text else None
         if streamed:
             body["stream"] = True
@@ -1012,13 +1027,34 @@ class Agent:
             memory=self.memory.listing() or "(nothing yet)",
         )
 
-    def run(self, history: list[dict[str, Any]], task: str) -> str:
+    def run(self, history: list[dict[str, Any]], task: str, images: list[str] | None = None) -> str:
         try:
-            return self.steps(history, task)
+            return self.steps(history, task, images or [])
         finally:
             if self.holding:
                 self.holding = False
                 self.device_lock.release()
+
+    def check_done(self, request: str, reply: str, done_steps: list[tuple[str, dict[str, Any] | None]]) -> str | None:
+        """What's missing if the screen and actions clearly contradict the reply, else None. A second look by a
+        quick model (~1 s), since models sometimes report a step as done that they never did."""
+        if not self.claim_device():
+            return None
+        screen, _ = self.device.look()
+        actions = "\n".join(f"- {text}" for text, _ in done_steps) or "(none)"
+        messages = [
+            {"role": "system", "content": DONE_CHECK_PROMPT},
+            {"role": "user", "content": f"Request: {request}\n\nActions taken:\n{actions}\n\nReply: {reply}\n\n{screen}"},
+        ]
+        try:
+            answer, model = self.router.complete(messages, fast_first=True, tools=False, prefer=DONE_CHECKER)
+        except NoModelAvailable:
+            return None
+        verdict = (answer.get("content") or "").strip()
+        log.info(f"done check by {model.label}: {verdict[:200]}")
+        if answer.get("tool_calls") or not verdict.upper().startswith("WRONG"):
+            return None
+        return verdict.partition(":")[2].strip() or "the screen doesn't match the reply"
 
     def claim_device(self) -> bool:
         """Take the phone for the rest of this task, waiting briefly for a watch clip or command to finish."""
@@ -1029,7 +1065,7 @@ class Agent:
             self.device.wake()  # the screen may be off (/screenoff); reading and tapping need it on
         return True
 
-    def steps(self, history: list[dict[str, Any]], task: str) -> str:
+    def steps(self, history: list[dict[str, Any]], task: str, images: list[str]) -> str:
         request = SCHEDULED_PREFIX.sub("", task)
         prompt = task
         shortcut = self.shortcuts.match(request)
@@ -1042,9 +1078,15 @@ class Agent:
             )
             log.info(f"offering shortcut #{shortcut['id']} for: {request[:80]}")
         messages = [{"role": "system", "content": self.system_prompt()}, *history, {"role": "user", "content": prompt}]
+        first_new = len(messages) - 1
+        if images:  # separate from the request, so dropping old images later keeps the request
+            parts = [{"type": "image_url", "image_url": {"url": url}} for url in images]
+            messages.append({"role": "user", "content": [{"type": "text", "text": "The owner's photo:"}, *parts]})
         recent: list[str] = []
         done_steps: list[tuple[str, dict[str, Any] | None]] = []
         went_in_circles = False
+        checks = 0
+        doubtful = False  # the last check said the screen doesn't show the task done
         if replayable:
             done_steps = self.replay(shortcut, messages)
         for step in range(MAX_STEPS):
@@ -1052,7 +1094,9 @@ class Agent:
                 return "Stopped."
             self.on_step()
             try:
-                message, model = self.router.complete(messages, fast_first=step == 0, on_text=self.on_text)
+                # The quick first-step models can't see images.
+                fast = step == 0 and not images
+                message, model = self.router.complete(messages, fast_first=fast, on_text=self.on_text)
                 if step == 0 and model.fast and is_refusal(message):
                     # Quick models refuse some things the main models handle within the rules; let those decide.
                     log.info(f"{model.label} refused; asking the main models instead")
@@ -1062,11 +1106,28 @@ class Agent:
             messages.append(message)
             calls = message.get("tool_calls") or []
             if not calls:
-                if done_steps and len(done_steps) <= MAX_SHORTCUT_STEPS and not went_in_circles:
+                reply = (message.get("content") or "").strip() or "(no reply)"
+                moved = any(
+                    call["function"]["name"] in SHOWS_SCREEN_AFTER
+                    for earlier in messages[first_new:]
+                    for call in earlier.get("tool_calls") or []
+                )
+                if moved and checks < MAX_DONE_CHECKS and not self.cancelled():
+                    checks += 1
+                    problem = self.check_done(request, reply, done_steps)
+                    doubtful = problem is not None
+                    if doubtful and checks < MAX_DONE_CHECKS:
+                        messages.append({
+                            "role": "user",
+                            "content": f"Before you reply: a check of the current screen says this isn't done ({problem}). "
+                            "Look at the screen, then finish the task, or tell the owner plainly what didn't happen.",
+                        })
+                        continue
+                if done_steps and len(done_steps) <= MAX_SHORTCUT_STEPS and not went_in_circles and not doubtful:
                     # Replayable only if every step is, so a replay never skips a step it can't redo.
                     calls = [replay for _, replay in done_steps]
                     self.shortcuts.save(request, [text for text, _ in done_steps], calls if all(calls) else [])
-                return (message.get("content") or "").strip() or "(no reply)"
+                return reply
             signature = json.dumps([action_key(c) for c in calls])
             recent = (recent + [signature])[-LOOP_WINDOW:]
             images, first_result = [], len(messages)
