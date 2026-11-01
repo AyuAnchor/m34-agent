@@ -69,6 +69,7 @@ BUILT_IN_COMMANDS = [  # (command, description) shown in /help and Telegram's co
     ("schedules", "Scheduled tasks (/unschedule N cancels one)"),
     ("shortcuts", "Saved shortcuts (/delshortcut N deletes one)"),
     ("usage", "AI requests today vs the free daily limits"),
+    ("model", "Choose the AI model for tasks, or Auto"),
     ("watch", "Message me if anything moves: /watch 10m [front|back] [people]"),
     ("unwatch", "Stop the camera watch"),
     ("listen", f"Message me if I hear a sound: /listen 8h [{'|'.join(SOUNDS)}]"),
@@ -306,7 +307,8 @@ class Bridge:
 
     def keep_warm(self) -> None:
         while True:
-            for pool in (self.tg.pool, *self.agent.router.pools.values()):
+            transcriber = [self.transcribe.pool] if self.transcribe else []
+            for pool in (self.tg.pool, *self.agent.router.pools.values(), *transcriber):
                 pool.refresh()
             time.sleep(WARM_EVERY_S)
 
@@ -418,6 +420,8 @@ class Bridge:
             self.tg.send(self.owner, self.schedules.listing() or "No scheduled tasks.")
         elif text == "/usage":
             self.tg.send(self.owner, self.usage_report(), parse_mode="HTML")
+        elif text == "/model":
+            self.tg.send(self.owner, self.model_choice(), reply_markup={"inline_keyboard": self.model_buttons()})
         elif text == "/shortcuts":
             self.tg.send(self.owner, self.shortcuts.listing() or "No shortcuts saved yet.")
         elif text.split()[0] in ("/forget", "/unschedule", "/delshortcut"):
@@ -468,8 +472,11 @@ class Bridge:
                     self.tg.send(self.owner, "Voice notes need a Groq API key (providers.groq in the config).")
                     return
                 start = time.time()
-                heard = self.transcribe(self.tg.download(file["file_id"]), "voice.ogg")
-                log.info(f"voice note ({file.get('duration', '?')}s) transcribed in {time.time() - start:.1f}s")
+                audio = self.tg.download(file["file_id"])
+                downloaded = time.time()
+                heard = self.transcribe(audio, "voice.ogg")
+                log.info(f"voice note ({file.get('duration', '?')}s) downloaded in {downloaded - start:.1f}s, "
+                         f"transcribed in {time.time() - downloaded:.1f}s")
                 if not heard:
                     self.tg.send(self.owner, "I couldn't make out any words in that voice note.")
                     return
@@ -684,8 +691,36 @@ class Bridge:
         finally:
             self.approvals.pop(req_id, None)
 
+    def model_choice(self) -> str:
+        router = self.agent.router
+        if not router.chosen:
+            return ("AI model for tasks: Auto. The quick models take the first step, then the best available "
+                    "model, with backups when one is slow or out of quota.")
+        title = next(m.title for m in router.models if m.name == router.chosen)
+        return f"AI model for tasks: {title}. When it's out of quota or failing, the others take over as in Auto."
+
+    def model_buttons(self) -> list[list[dict[str, str]]]:
+        router, now = self.agent.router, time.time()
+        rows = [[{"text": f"{'✓ ' if not router.chosen else ''}Auto", "callback_data": "model:"}]]
+        for model in router.choices():
+            keys = [m for m in router.models if m.name == model.name]
+            state = ""
+            if all(m.cooldown_until > now for m in keys):
+                state = " (out for today)" if all(m.out_of_quota for m in keys) else " (paused)"
+            mark = "✓ " if model.name == router.chosen else ""
+            rows.append([{"text": f"{mark}{model.title}{state}", "callback_data": f"model:{model.name}"}])
+        return rows
+
     def handle_callback(self, query: dict[str, Any]) -> None:
         if query.get("from", {}).get("id") != self.owner:
+            return
+        if (query.get("data") or "").startswith("model:"):
+            self.agent.router.choose(query["data"].removeprefix("model:"))
+            log.info(f"model chosen: {self.agent.router.chosen or 'auto'}")
+            self.tg.call("answerCallbackQuery", callback_query_id=query["id"], text="Saved")
+            if message := query.get("message"):
+                self.tg.call("editMessageText", chat_id=message["chat"]["id"], message_id=message["message_id"],
+                             text=self.model_choice())
             return
         choice, _, req_id = (query.get("data") or "").partition(":")
         pending = self.approvals.get(req_id)

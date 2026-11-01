@@ -27,6 +27,7 @@ ENDPOINTS = {  # provider -> (host, path) of its OpenAI-compatible chat endpoint
     "nvidia": ("integrate.api.nvidia.com", "/v1/chat/completions"),
 }
 COOLDOWNS_PATH = STATE_DIR / "cooldowns.json"
+CHOSEN_MODEL_PATH = STATE_DIR / "model.json"  # the owner's pick from /model; none means automatic
 # Quotas used up "per day" free up sooner than the documented reset (Groq's window rolls, and Gemini has
 # answered hours before midnight Pacific), so a full model is tried again after this long.
 DAILY_RECHECK_S = 3600
@@ -64,13 +65,23 @@ SCREEN_MARKER = "Elements on screen"
 ELEMENT_LINE = re.compile(r"^\[\d+\] (.*?)(?: #\S+)?(?: (?:checked|unchecked|selected|focused)\b.*)?$")
 MAX_OLD_SCREEN = 1500
 REFUSAL = re.compile(r"\b(I(?:'|’)?m sorry|I can(?:'|’)?t|I cannot|I(?:'|’)?m (?:not able|unable)|I won(?:'|’)?t)\b", re.IGNORECASE)
+# A reply saying something was done. Seen: "I've sent you a voice note" from a quick model that called no tool.
+CLAIMED = re.compile(
+    r"\b(?:I(?:'|’)?ve|I have|I)(?: just| now)? (?:sent|recorded|opened|turned|started|played|called|saved|taken|took"
+    r"|scheduled|changed|set|deleted|installed|downloaded)\b|\b(?:has|have) been (?:sent|set|opened|saved|turned)\b",
+    re.IGNORECASE,
+)
+NOTHING_DONE = (
+    "No tool has been used for this request, so nothing was done just now. If the owner asked for an action, "
+    "do it with the tools; if they're asking about earlier work, answer that without claiming anything new."
+)
 SCHEDULED_PREFIX = re.compile(r"^\[Scheduled #\d+\]\s*")
 TAPPED = re.compile(r'^(?:Tapped|Long-pressed) (?:\[\d+\] (.+?)|"(.+?)")\.$', re.MULTILINE)
 # Never saved into shortcuts: read-only, and anything sensitive or personal.
 SHORTCUT_SKIP = {
     "look", "phone_status", "list_schedules", "remember", "forget", "schedule_task", "cancel_schedule",
     "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "listen", "stop_watch",
-    "ask_owner",
+    "ask_owner", "send_voice",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs usually wandered; not worth replaying
 MAX_DONE_CHECKS = 2  # after a second failed check the reply goes out anyway (not saved as a route)
@@ -479,6 +490,11 @@ class Model:
         """The API this model is served by: "gemini#2" (a second account's key) is still "gemini"."""
         return self.provider.split("#")[0]
 
+    @property
+    def title(self) -> str:
+        """Name for the owner, e.g. on the /model buttons."""
+        return TITLES.get(self.name, self.short)
+
 
 # Each Gemini model is tried on every configured Gemini key ("gemini", "gemini#2") before the next model.
 MODELS = [
@@ -497,6 +513,17 @@ MODELS = [
     Model("groq", "qwen/qwen3.8-27b", vision=True, fast=2, daily=1000),
     Model("groq", "openai/gpt-oss-120b", vision=False, effort="low", fast=1, daily=1000),
 ]
+TITLES = {
+    "gemini-3-flash-preview": "Gemini 3 Flash",
+    "gemini-flash-latest": "Gemini 3.8 Flash",
+    "gemini-3.6-flash": "Gemini 3.6 Flash",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b": "Nemotron 3.5 Super (NVIDIA)",
+    "gemini-flash-lite-latest": "Gemini 3.5 Flash Lite",
+    "gemini-3.1-flash-lite": "Gemini 3.1 Flash Lite",
+    "mistralai/mistral-large-4-1t-a52b": "Mistral Large 4 (NVIDIA)",
+    "qwen/qwen3.8-27b": "Qwen 3.8 27B (Groq)",
+    "openai/gpt-oss-120b": "GPT-OSS 120B (Groq, can't see images)",
+}
 
 
 class NoModelAvailable(Exception):
@@ -604,6 +631,18 @@ class Router:
         # Models failing with server or network errors: label -> (first failure, latest failure).
         self.trouble: dict[str, tuple[float, float]] = {}
         self.load_cooldowns()
+        saved = read_json(CHOSEN_MODEL_PATH, {}).get("model", "")
+        self.chosen = saved if any(m.name == saved for m in self.models) else ""
+
+    def choices(self) -> list[Model]:
+        """One entry per model, whichever keys it's on."""
+        return list({m.name: m for m in self.models}.values())
+
+    def choose(self, name: str) -> None:
+        """Ask this model first for every step from now on ("" = automatic). Others still take over when
+        it's out of quota or failing."""
+        self.chosen = name if any(m.name == name for m in self.models) else ""
+        write_atomically(CHOSEN_MODEL_PATH, json.dumps({"model": self.chosen}))
 
     def load_cooldowns(self) -> None:
         """Restarts shouldn't forget which models are out of quota; retrying them costs seconds."""
@@ -633,9 +672,12 @@ class Router:
         """Ask the best available model. fast_first tries the quickest models first (a task's first step:
         plain chat ends there); later steps go to the smartest. A model with no answer after HEDGE_S gets
         company: the next model is asked too and the first answer wins. on_text receives a text answer as
-        it's written. prefer names a model to try (on any key) before the rest."""
-        order = sorted(self.models, key=lambda m: (m.fast == 0, m.fast)) if fast_first else self.models
-        order = sorted(order, key=lambda m: m.name != prefer)
+        it's written. prefer names a model to try (on any key) before the rest; without it, the owner's
+        /model pick goes first, for the first step too."""
+        chosen = "" if prefer else self.chosen
+        first = prefer or chosen
+        order = sorted(self.models, key=lambda m: (m.fast == 0, m.fast)) if fast_first and not chosen else self.models
+        order = sorted(order, key=lambda m: m.name != first)
         running: dict[str, tuple[Model, float]] = {}  # label -> (model, when it was asked)
         outcomes: queue.Queue[tuple[Model, dict[str, Any] | None]] = queue.Queue()
         gate = TextGate(on_text) if on_text else None
@@ -643,14 +685,15 @@ class Router:
 
         def start() -> bool:
             """Ask the next model that isn't cooling down or already asked. Not the same model as one still
-            thinking (on another key it's likely just as slow), and models set aside as slow come last. A
-            backup goes to another provider first: slowness and 503s hit a provider's models together."""
+            thinking (on another key it's likely just as slow), and models set aside as slow come last unless
+            asked for by name. A backup goes to another provider first: slowness and 503s hit a provider's
+            models together."""
             nonlocal skipped
             now = time.time()
             busy = {model.name for model, _ in running.values()}
             families = {model.family for model, _ in running.values()}
             ready = [m for m in order if m.cooldown_until <= now and m.name not in busy]
-            ready.sort(key=lambda m: (m.slow_until > now, m.family in families))
+            ready.sort(key=lambda m: (m.slow_until > now and m.name != first, m.family in families))
             if not ready:
                 return False
             model = ready[0]
@@ -1104,6 +1147,7 @@ class Agent:
         went_in_circles = False
         checks = 0
         doubtful = False  # the last check said the screen doesn't show the task done
+        nudged = False
         if replayable:
             done_steps = self.replay(shortcut, messages)
         for step in range(MAX_STEPS):
@@ -1124,11 +1168,14 @@ class Agent:
             calls = message.get("tool_calls") or []
             if not calls:
                 reply = (message.get("content") or "").strip() or "(no reply)"
-                moved = any(
-                    call["function"]["name"] in SHOWS_SCREEN_AFTER
-                    for earlier in messages[first_new:]
-                    for call in earlier.get("tool_calls") or []
-                )
+                used = [call["function"]["name"] for earlier in messages[first_new:] for call in earlier.get("tool_calls") or []]
+                if not used and not done_steps and not nudged and CLAIMED.search(reply):
+                    nudged = True
+                    log.info(f"{model.label} claimed an action without using a tool; asking again")
+                    messages.pop()  # left in, the false claim was simply repeated
+                    messages.append({"role": "user", "content": NOTHING_DONE})
+                    continue
+                moved = any(name in SHOWS_SCREEN_AFTER for name in used)
                 if moved and checks < MAX_DONE_CHECKS and not self.cancelled():
                     checks += 1
                     problem = self.check_done(request, reply, done_steps)

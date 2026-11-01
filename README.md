@@ -147,6 +147,10 @@ Flash Lite does it: it was right on all 18 test cases (true and false claims, bo
 claimed settings change, and Qwen called a results page that was still loading a failed search. Runs
 whose last check failed aren't saved as shortcuts.
 
+A reply that claims something was done ("I've sent you a voice note") when no tool ran for the request
+is caught without a model: the claim is dropped and the agent is told nothing was done yet, once. Seen
+when a quick model saw "I've sent it" earlier in the conversation and simply said it again.
+
 ### Fast screen reading
 
 Android's built-in `uiautomator dump` starts a new process on every call (~3 s). The agent instead
@@ -231,6 +235,11 @@ Groq's 8K tokens a minute rarely fits a ~4-6K token step). A model that loses th
 is asked only after the others for 5 minutes, doubling while it stays slow (up to an hour). If every
 model is briefly rate-limited (back within 20 s), the bot waits rather than giving up.
 
+**Choosing a model.** `/model` shows a button per model (marked "out for today" or "paused" when it
+can't answer now) plus Auto, the order above. A tapped model is asked first for every step of later
+tasks, the first step too, even after it was slow; the rest still take over when it's out of quota or
+fails, and a backup still joins after 5 s. The choice is kept in `model.json` across restarts.
+
 ### Speed
 
 | What | Typical time |
@@ -254,6 +263,9 @@ What makes it fast:
   retry models that are out of quota.
 - **Less thinking**: models that support it get `reasoning_effort: low`.
 - **Fast screen reading** with uiautomator2 (see above).
+- **Opened apps are read once loaded**: `open_app` waits (up to 4 s) for the new app's elements.
+  YouTube shows an empty window for ~1-2 s, which the screen read took as settled, and the AI then
+  spent a step waiting 5 s ("open yt" took 17 s; now ~1.6 s to a readable screen).
 
 ### Web reading
 
@@ -627,6 +639,7 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 | `/schedules`, `/unschedule N` | see scheduled tasks, cancel task N |
 | `/shortcuts`, `/delshortcut N` | see saved shortcuts, delete shortcut N |
 | `/usage` | Table of AI requests per model against the free daily limits (Groq's own numbers), and which models are paused |
+| `/model` | buttons to pick the AI model for tasks, or Auto (the default) |
 | `/watch 10m [front\|back] [people]`, `/unwatch` | message me with a clip if anything moves (or only when someone enters); stop watching |
 | `/listen 8h [cry\|scream\|dog\|alarm\|glass\|door]`, `/unlisten` | message me with a recording when I hear the sound (default `cry`); stop listening |
 | `/play 30m` | play Hill Climb Racing by itself, then message a summary; `/stop` ends it |
