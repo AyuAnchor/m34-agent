@@ -9,10 +9,11 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from device import MAX_AUDIO_S, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, is_temporary, phone_line_problem, ready_to_send
+from device import MAX_AUDIO_S, MEDIA_DIR, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, is_temporary, phone_line_problem, ready_to_send
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -243,7 +244,7 @@ TOOLS = [
     ),
     function(
         "record_audio",
-        "Record sound only (no video); returns its path.",
+        "Record what the phone's microphone hears (no video); returns its path.",
         {"seconds": prop("integer", f"1-{MAX_AUDIO_S}")},
         ("seconds",),
     ),
@@ -285,6 +286,17 @@ TOOLS = [
     ),
     function("set_brightness", "Set screen brightness.", {"percent": prop("integer", "0-100")}, ("percent",)),
     function("speak", "Say something out loud on the phone.", {"text": prop("string")}, ("text",)),
+    function(
+        "send_voice",
+        "Send the owner a voice message of text spoken aloud (any language). Use it when they ask for a voice "
+        "note, a spoken answer or to hear something; then a one-line text reply is enough. Not record_audio "
+        "(that records the room) or speak (that plays on the phone's speaker).",
+        {
+            "text": prop("string", "the exact words to say"),
+            "style": prop("string", "how to say it, e.g. 'cheerful', 'slowly', 'whispering'"),
+        },
+        ("text",),
+    ),
     function("search_contacts", "Find contacts by name or number.", {"query": prop("string")}, ("query",)),
     function(
         "make_call",
@@ -934,6 +946,7 @@ class Agent:
         on_action: Callable[[str, str], None],
         on_text: Callable[[str], None],
         cancelled: Callable[[], bool],
+        voice: Callable[[str, str, Path], float] | None = None,
     ) -> None:
         self.router = router
         self.device = device
@@ -951,6 +964,7 @@ class Agent:
         self.on_action = on_action
         self.on_text = on_text
         self.cancelled = cancelled
+        self.voice = voice
         self.handlers: dict[str, Callable[[dict[str, Any], Model], str | tuple[str, str | None]]] = {
             "look": lambda a, m: self.device.look(picture=True),
             "tap": lambda a, m: self.device.tap(
@@ -973,6 +987,7 @@ class Agent:
             "open_settings": lambda a, m: self.device.open_settings(str(a.get("page", "")), str(a.get("app") or "")),
             "toggle_setting": lambda a, m: self.device.toggle(str(a.get("setting", "")), as_bool(a.get("on"))),
             "speak": lambda a, m: self.device.speak(str(a.get("text", ""))),
+            "send_voice": lambda a, m: self.send_voice(str(a.get("text", "")), str(a.get("style") or "")),
             "search_contacts": lambda a, m: self.device.search_contacts(str(a.get("query", ""))),
             "make_call": lambda a, m: phone_line_problem() or self.approved(
                 f"Call {a.get('number')}?", lambda: self.device.make_call(str(a.get("number", "")))
@@ -1271,6 +1286,20 @@ class Agent:
                 if is_temporary(temporary):
                     temporary.unlink(missing_ok=True)
         return "Sent."
+
+    def send_voice(self, text: str, style: str) -> str:
+        if not self.voice:
+            return "Voice messages need a Gemini API key (providers.gemini in the config)."
+        if not text.strip():
+            return "Nothing to say."
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+        out = MEDIA_DIR / f"voice-{time.time_ns()}.opus"
+        try:
+            seconds = self.voice(text, style, out)
+            self.send_file(out, "")
+        finally:
+            out.unlink(missing_ok=True)
+        return f"Sent a {seconds:.0f}s voice message."
 
     def send_screenshot(self, caption: str) -> str:
         self.device.snapshot()

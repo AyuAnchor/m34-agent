@@ -20,7 +20,7 @@ from commands import QuickCommands, format_telegram, parse_duration, plain
 from device import Device, adb, getprop, is_temporary, ready_to_send
 from game import Game
 from net import ConnectionPool, multipart
-from speech import Transcriber
+from speech import Transcriber, Voice
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
 from updater import current_version, self_update
 from watch import SOUNDS, MotionWatch, SoundWatch
@@ -60,6 +60,7 @@ UPLOAD_KINDS = {  # file suffix -> (Bot API method, form field)
     **dict.fromkeys((".jpg", ".jpeg", ".png", ".webp"), ("sendPhoto", "photo")),
     **dict.fromkeys((".mp4", ".mov", ".3gp", ".mkv"), ("sendVideo", "video")),
     **dict.fromkeys((".m4a", ".mp3", ".aac", ".wav", ".ogg"), ("sendAudio", "audio")),
+    ".opus": ("sendVoice", "voice"),  # Ogg Opus shows as a voice message
 }
 BUILT_IN_COMMANDS = [  # (command, description) shown in /help and Telegram's command menu
     ("status", "What I'm doing right now"),
@@ -217,8 +218,8 @@ class Bridge:
         # (task, when the owner sent it, photos to show the AI as data URLs)
         self.tasks: queue.Queue[tuple[str, float, list[str]]] = queue.Queue()
         self.received: list[str] = []  # notes on files the owner sent without a request, for the next task
-        groq_key = self.config.get("providers", {}).get("groq")
-        self.transcribe = Transcriber(groq_key) if groq_key else None
+        providers = self.config.get("providers", {})
+        self.transcribe = Transcriber(providers["groq"]) if providers.get("groq") else None
         self.busy = False
         self.cancel = threading.Event()
         self.approvals: dict[str, tuple[threading.Event, list[bool]]] = {}
@@ -242,8 +243,10 @@ class Bridge:
         self.usage = Usage()
         self.schedules = Schedules(getprop("persist.sys.timezone") or "UTC")
         self.shortcuts = Shortcuts()
+        router = Router(providers, usage=self.usage)
+        gemini_keys = [key for name, key in providers.items() if name.split("#")[0] == "gemini" and key]
         self.agent = Agent(
-            Router(self.config.get("providers", {}), usage=self.usage),
+            router,
             self.device,
             self.memory,
             self.schedules,
@@ -258,6 +261,7 @@ class Bridge:
             on_action=self.on_action,
             on_text=self.show_draft,
             cancelled=self.cancel.is_set,
+            voice=Voice(gemini_keys, router.pools.get("gemini")) if gemini_keys else None,
         )
 
     def send_reply(self, text: str) -> None:

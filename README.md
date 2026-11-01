@@ -48,7 +48,7 @@ Tested on Galaxy M34, Android 16 (One UI 8.5), Termux 0.118.3, Shizuku 13.6.0.
 | **device.py** | Debian, user `agent` | Phone actions: numbered screen elements, taps, typing, apps, camera, files |
 | **store.py** | Debian, user `agent` | Memory notes and scheduled tasks (small JSON files) |
 | **commands.py** | Debian, user `agent` | Instant `/commands` that call device actions directly, no AI |
-| **speech.py** | Debian, user `agent` | Voice notes to text (Groq Whisper) |
+| **speech.py** | Debian, user `agent` | Voice notes to text (Groq Whisper), text to voice messages (Gemini) |
 | **phone** | Debian | `adb` pointed at the phone itself (`127.0.0.1:5555`) |
 | **runit** | Termux | Keeps the bridge running, restarts it if it crashes |
 | **Termux:Boot** | Android app | Starts everything after a reboot |
@@ -78,6 +78,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `open_settings` | Jump straight to a Settings page (display, sound, battery, apps, one app's info page...) instead of tapping through menus |
 | `phone_status` | Volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb, battery, storage, RAM and chipset in one step |
 | `speak` | Say something out loud through the phone's speaker |
+| `send_voice` | Send you a voice message of any text (Gemini text-to-speech), for "answer in voice" |
 | `search_contacts` | Find contacts by name or number |
 | `make_call`, `send_sms`, `send_email` | Always ask you first; calls/SMS need a SIM and airplane mode off |
 | `find_media`, `send_file`, `send_screenshot` | Find photos/videos, send any file or the screen to you |
@@ -334,6 +335,7 @@ won't match and it stops without tapping.
 | Groq `openai/gpt-oss-120b` | ~30 | 8K | 1,000 |
 | Groq `qwen/qwen3.8-27b` | ~30 | 8K (7K input) | 1,000 |
 | Groq `whisper-large-v3` (voice notes) | 20 | - | 2,000 (8 h of audio) |
+| Gemini 3.8 Flash Lite / Flash TTS (voice replies) | free; limits not published, see AI Studio | - | - |
 
 Every agent step is one request, so the three Gemini Flash models cover only a few phone tasks a
 day; the Flash Lite models do most of the work. Gemini limits are per Google Cloud project and reset at
@@ -402,7 +404,7 @@ m34-agent/
 │   ├── device.py              phone actions: numbered elements, taps, apps, camera, files
 │   ├── commands.py            instant /commands that skip the AI
 │   ├── net.py                 shared HTTPS connection pool (IPv4 first, kept warm)
-│   ├── speech.py              voice notes to text (Groq Whisper)
+│   ├── speech.py              voice notes to text (Groq Whisper), voice replies (Gemini)
 │   ├── store.py               memory notes, scheduled tasks, shortcuts
 │   ├── watch.py               camera watch (clips + frame comparison) and sound watch
 │   ├── detect.py              on-device sound and person recognition (YAMNet, EfficientDet)
@@ -617,6 +619,7 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 |---|---|
 | any task in plain words | the agent does it and replies |
 | a voice note | transcribed (any language), shown back as "Heard: ...", then run as a task |
+| "...answer in voice" | the reply comes as a voice message too |
 | a photo, video or file | saved on the phone in `Download/Telegram`; its caption, if any, becomes a task about it |
 | `/status` | current task, time, steps, model, queue |
 | `/screen` | instant screenshot, no AI involved |
@@ -636,6 +639,13 @@ Examples: *"record a 10 second video from the front camera and send it"*,
 **Voice notes** go to Groq's `whisper-large-v3` with the Groq key the models already use (~0.3-0.5 s for
 a short note). It was as fast as the turbo model in testing, and heard "सात बजे" as "7 बजे" where turbo
 heard "साथ बजे" ("with o'clock"). The transcript is sent back so you can see what it understood.
+
+**Voice replies.** Ask for one ("send me a voice note saying good morning in Hindi", "how much battery is
+left? answer in voice") and the answer comes back as a Telegram voice message. The AI's `send_voice` tool
+uses Gemini's free text-to-speech (`gemini-3.8-flash-lite-tts`, then `gemini-3.8-flash-tts`, each on every
+Gemini key) with the voice Kore, in 100+ languages. The audio is streamed into ffmpeg as it's generated,
+so a 7 s message is ready in ~3 s; generating first and converting after took ~6 s (ffmpeg alone needs
+~1 s to start in Debian).
 
 **Files** you send (up to 20 MB, Telegram's limit for bots) land in `/sdcard/Download/Telegram`, renamed
 if the name is taken, and photos and videos are indexed so Gallery shows them. With a caption ("set this as
