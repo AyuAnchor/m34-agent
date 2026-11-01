@@ -472,7 +472,7 @@ class Bridge:
                 self.queue_task(heard, sent_at)
                 return
             data = self.tg.download(file["file_id"])
-            name = file.get("file_name") or FILE_NAMES[kind].format(datetime.fromtimestamp(sent_at))
+            name = file.get("file_name") or FILE_NAMES[kind].format(datetime.fromtimestamp(sent_at, self.schedules.tz))
             name = re.sub(r"[^\w.\- ]+", "_", Path(name).name).strip() or "file"
             RECEIVED_DIR.mkdir(exist_ok=True)
             local = RECEIVED_DIR / name
