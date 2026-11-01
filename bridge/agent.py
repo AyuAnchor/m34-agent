@@ -65,10 +65,14 @@ SCREEN_MARKER = "Elements on screen"
 ELEMENT_LINE = re.compile(r"^\[\d+\] (.*?)(?: #\S+)?(?: (?:checked|unchecked|selected|focused)\b.*)?$")
 MAX_OLD_SCREEN = 1500
 REFUSAL = re.compile(r"\b(I(?:'|’)?m sorry|I can(?:'|’)?t|I cannot|I(?:'|’)?m (?:not able|unable)|I won(?:'|’)?t)\b", re.IGNORECASE)
-# A reply saying something was done. Seen: "I've sent you a voice note" from a quick model that called no tool.
+# A reply saying something was done, from a model that called no tool. Seen from a quick model: "I've sent you
+# a voice note", "I've tapped DEPLOY TROOPS", and a copy of the bot's own "Stopped: I kept repeating..." notice.
 CLAIMED = re.compile(
-    r"\b(?:I(?:'|’)?ve|I have|I)(?: just| now)? (?:sent|recorded|opened|turned|started|played|called|saved|taken|took"
-    r"|scheduled|changed|set|deleted|installed|downloaded)\b|\b(?:has|have) been (?:sent|set|opened|saved|turned)\b",
+    r"\b(?:I(?:'|’)?ve|I have|I)(?: just| now| already)? (?:sent|recorded|opened|turned|started|played|called|saved"
+    r"|taken|took|scheduled|changed|set|deleted|installed|downloaded|tapped|pressed|typed|entered|clicked|selected"
+    r"|deployed|attacked|closed|cleared|paused|stopped|searched|followed|finished|completed|done)\b"
+    r"|\b(?:has|have) been (?:sent|set|opened|saved|turned|tapped|deployed|done|completed)\b"
+    r"|^Stopped: I kept repeating",
     re.IGNORECASE,
 )
 NOTHING_DONE = (

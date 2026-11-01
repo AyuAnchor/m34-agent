@@ -147,9 +147,10 @@ Flash Lite does it: it was right on all 18 test cases (true and false claims, bo
 claimed settings change, and Qwen called a results page that was still loading a failed search. Runs
 whose last check failed aren't saved as shortcuts.
 
-A reply that claims something was done ("I've sent you a voice note") when no tool ran for the request
-is caught without a model: the claim is dropped and the agent is told nothing was done yet, once. Seen
-when a quick model saw "I've sent it" earlier in the conversation and simply said it again.
+A reply that claims something was done ("I've sent you a voice note", "I've tapped Deploy troops") when no
+tool ran for the request is caught without a model: the claim is dropped and the agent is told nothing was
+done yet, once. Seen when a quick model saw "I've sent it" earlier in the conversation and simply said it
+again, and when it copied the bot's own "Stopped: I kept repeating..." notice.
 
 ### Fast screen reading
 
