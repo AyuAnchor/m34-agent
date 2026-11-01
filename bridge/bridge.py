@@ -45,6 +45,7 @@ WIRELESS_GUARD_S = 60  # how often to check that wireless debugging is on and tr
 BATTERY_CHECK_S = 120
 BATTERY_LOW = 15  # alert below this %
 BATTERY_REARM = 20  # ...and alert again only after it has been back at or above this %
+BATTERY_ALERTED_PATH = STATE_DIR / "battery_alerted"
 OWNER_SCREEN_PATH = Path("/tmp/owner-screen.jpg")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # bots can't download bigger files from Telegram
@@ -762,8 +763,9 @@ class Bridge:
         return f"<b>AI usage</b>\n<pre>{html.escape(table)}</pre>\n" + "\n".join(notes)
 
     def monitor_battery(self) -> None:
-        """Message the owner once when the battery drops below BATTERY_LOW, and when it has recovered."""
-        alerted = False
+        """Message the owner once when the battery drops below BATTERY_LOW, and when it has recovered. Whether
+        the alert went out is kept on disk, so a restart (an update, a reboot) doesn't send it again."""
+        alerted = BATTERY_ALERTED_PATH.exists()
         while True:
             time.sleep(BATTERY_CHECK_S)
             try:
@@ -779,8 +781,12 @@ class Bridge:
                 state = "charging" if charging else "not charging; is the charger unplugged or the power off?"
                 alerted = self.notify(f"Battery low: {level}% ({state}). I'll stop working when it runs out.")
                 log.info(f"low battery alert at {level}% ({'sent' if alerted else 'not delivered, will retry'})")
+                if alerted:
+                    BATTERY_ALERTED_PATH.touch()
             elif level >= BATTERY_REARM and alerted:
                 alerted = not self.notify(f"Battery back up to {level}%.")
+                if not alerted:
+                    BATTERY_ALERTED_PATH.unlink(missing_ok=True)
 
     def check_phone_control(self) -> None:
         """After a start (usually a reboot), tell the owner if screen control doesn't come back."""
