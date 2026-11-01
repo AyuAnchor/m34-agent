@@ -43,6 +43,7 @@ TEXT_WAIT_S = 1.5  # a tap by text waits this long for its text to show up
 EDIT_TEXT = "android.widget.EditText"  # also what Chrome reports for a web page's text inputs
 WEB_VIEW = ("android.webkit.WebView", "Web View")  # class, and the description of Chrome's page area
 PAGE_WAIT_S = 5  # uncached pages showed up after ~1.5-2 s
+APP_WAIT_S = 4  # YouTube's screen was readable 1.8 s after opening warm, 2.2 s cold
 VIEW = "android.intent.action.VIEW"
 BROWSABLE = "android.intent.category.BROWSABLE"
 BROWSER = "com.android.chrome"
@@ -354,6 +355,7 @@ class Device:
         self.elements: list[Element] = []
         self.changed = False  # something was done since the last look, so the numbered elements may have moved
         self.empty_web_page = False
+        self.packages: set[str] = set()  # apps with windows in the last screen read
         self.automator = None
         self.apps: dict[str, str] = {}  # package -> its launcher component
         self._specs = ""
@@ -406,6 +408,7 @@ class Device:
         if (rotation := root.get("rotation")) in ("0", "1", "2", "3"):
             short, long = self.portrait
             self.width, self.height = (long, short) if rotation in ("1", "3") else (short, long)
+        self.packages = {package for node in root.iter("node") if (package := node.get("package"))}
         elements: list[Element] = []
         seen = set()
         # Chrome shows an empty "Web View" while a page loads (~0.5-1.5 s) and sometimes keeps it (seen on
@@ -758,19 +761,28 @@ class Device:
         start_activity(action, SETTINGS_FLAGS)
         return f"Opened {page.replace('_', ' ')} settings."
 
-    def open_app(self, name: str) -> str:
+    def open_app(self, name: str, wait: bool = True) -> str:
+        """With wait, returns once the app's screen has elements: YouTube shows an empty window for ~1-2 s,
+        which a look takes as settled, and the AI then spent a step on wait (seen: 5 s)."""
         self.changed = True
         package = self.find_package(name)
         if package is None:
             return f"No app with a home-screen icon matches {name!r}. Try another name."
-        # am start is ~0.4 s quicker than monkey, and the look that follows waits for the app to finish opening.
-        # monkey stays as the fallback for packages that aren't in the launcher list.
+        before = self.read_elements() if wait else []
+        wait = wait and package not in self.packages  # already on screen: nothing will change
+        # am start is ~0.4 s quicker than monkey. monkey stays as the fallback for packages that aren't in the
+        # launcher list.
         component = self.launchable().get(package)
         # The same intent and flags a launcher uses, so an app already open comes back where it was.
         output = shell(f"am start -a android.intent.action.MAIN -c {LAUNCHER} -f 0x10200000 -n {shlex.quote(component)}") if component else ""
         if not component or "Error" in output:
             shell(f"monkey -p {package} -c {LAUNCHER} 1")
             time.sleep(1.5)
+        deadline = time.time() + APP_WAIT_S
+        while wait and time.time() < deadline:  # games may never show elements: they get the full wait
+            elements = self.read_elements()
+            if elements and elements != before:
+                break
         card = APP_CARDS.get(package)
         return f"Opened {package} (only opened: {card})." if card else f"Opened {package}."
 

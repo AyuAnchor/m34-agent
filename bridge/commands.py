@@ -156,7 +156,7 @@ class QuickCommands:
         return Reply(f"Usage: {self.table[name].usage}")
 
     def open(self, args: str) -> Reply:
-        return Reply(self.device.open_app(args)) if args else self.usage("open")
+        return Reply(self.device.open_app(args, wait=False)) if args else self.usage("open")
 
     def url(self, args: str) -> Reply:
         if not args:
