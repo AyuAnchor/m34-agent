@@ -369,6 +369,7 @@ class Device:
         # or the screen went back to how it was a look earlier ("back"). Cleared at the start of each task.
         self.looks: list[tuple[list[Element], Image.Image | None]] = []
         self.screen_note = ""
+        self.receive_lock = threading.Lock()
         self.automator = None
         self.apps: dict[str, str] = {}  # package -> its launcher component
         self._specs = ""
@@ -1072,13 +1073,15 @@ class Device:
 
     def receive(self, local: Path) -> str:
         """Put a file from the owner in Download/Telegram, renamed if the name is taken, and have it indexed
-        so photos and videos show up in Gallery."""
-        path = f"{RECEIVED_DIR}/{local.name}"
-        number = 1
-        while shell(f"[ -e {shlex.quote(path)} ] && echo taken") == "taken":
-            path = f"{RECEIVED_DIR}/{local.stem}_{number}{local.suffix}"
-            number += 1
-        result = adb("push", str(local), path, timeout=300)
+        so photos and videos show up in Gallery. One at a time: an album's photos arrive together, and two
+        could otherwise both find the same name free."""
+        with self.receive_lock:
+            path = f"{RECEIVED_DIR}/{local.name}"
+            number = 1
+            while shell(f"[ -e {shlex.quote(path)} ] && echo taken") == "taken":
+                path = f"{RECEIVED_DIR}/{local.stem}_{number}{local.suffix}"
+                number += 1
+            result = adb("push", str(local), path, timeout=300)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.decode(errors="replace").strip() or "adb push failed")
         shell(f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {shlex.quote(f'file://{path}')}")

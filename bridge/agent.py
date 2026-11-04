@@ -90,6 +90,7 @@ NOTHING_DONE = (
     "do it with the tools; if they're asking about earlier work, answer that without claiming anything new."
 )
 SCHEDULED_PREFIX = re.compile(r"^\[Scheduled #\d+\]\s*")
+OWNER_PHOTO = "The owner's photo:"
 TAPPED = re.compile(r'^(?:Tapped|Long-pressed) (?:\[\d+\] (.+?)|"(.+?)")\.$', re.MULTILINE)
 # Never saved into shortcuts: read-only, and anything sensitive or personal.
 SHORTCUT_SKIP = {
@@ -982,9 +983,11 @@ def shortcut_step(call: dict[str, Any], result: str) -> tuple[str, dict[str, Any
 
 
 def drop_old_images(messages: list[dict[str, Any]]) -> None:
-    """Keep only the newest screenshot in context; older ones just cost tokens."""
+    """Keep only the newest screenshot in context; older ones just cost tokens. The owner's photo stays: the
+    task is about it (it's shrunk on arrival, so keeping it is cheap)."""
     for message in messages:
-        if isinstance(message.get("content"), list):
+        content = message.get("content")
+        if isinstance(content, list) and content[0].get("text") != OWNER_PHOTO:
             message["content"] = "[earlier screenshot removed]"
 
 
@@ -1166,7 +1169,7 @@ class Agent:
         first_new = len(messages) - 1
         if images:  # separate from the request, so dropping old images later keeps the request
             parts = [{"type": "image_url", "image_url": {"url": url}} for url in images]
-            messages.append({"role": "user", "content": [{"type": "text", "text": "The owner's photo:"}, *parts]})
+            messages.append({"role": "user", "content": [{"type": "text", "text": OWNER_PHOTO}, *parts]})
         recent: list[str] = []
         done_steps: list[tuple[str, dict[str, Any] | None]] = []
         went_in_circles = False

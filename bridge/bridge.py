@@ -2,6 +2,7 @@
 """Telegram bridge: the owner's messages become tasks for the phone agent."""
 import base64
 import html
+import io
 import json
 import logging
 import logging.handlers
@@ -14,6 +15,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+from PIL import Image, ImageOps
 
 from agent import Agent, Router
 from commands import QuickCommands, format_telegram, parse_duration, plain
@@ -53,6 +56,7 @@ RECEIVED_DIR = STATE_DIR / "received"  # files from the owner, on their way to t
 ATTACHMENTS = ("voice", "photo", "video", "video_note", "audio", "document")  # "photo" is a list of sizes
 VIEWABLE_IMAGES = ("image/jpeg", "image/png", "image/webp")  # sent with a request, the AI sees these too
 MAX_VIEWED_BYTES = 4 * 1024 * 1024
+VIEWED_PX = 1280  # the AI's copy of the owner's photo, longest side: it's re-sent with every step of the task
 FILE_NAMES = {"photo": "photo_{:%Y%m%d_%H%M%S}.jpg", "video": "video_{:%Y%m%d_%H%M%S}.mp4",
               "video_note": "video_{:%Y%m%d_%H%M%S}.mp4", "audio": "audio_{:%Y%m%d_%H%M%S}.mp3",
               "document": "file_{:%Y%m%d_%H%M%S}"}
@@ -98,6 +102,15 @@ def load_json(path: Path, default: Any) -> Any:
 
 def save_json(path: Path, data: Any) -> None:
     write_atomically(path, json.dumps(data, indent=2))
+
+
+def viewable(data: bytes) -> str:
+    """A photo as a data URL for the AI, at most VIEWED_PX on its longest side and turned upright."""
+    image = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    image.thumbnail((VIEWED_PX, VIEWED_PX))
+    buffer = io.BytesIO()
+    image.save(buffer, "JPEG", quality=80)
+    return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode()}"
 
 
 def split_message(text: str, limit: int) -> list[str]:
@@ -486,19 +499,22 @@ class Bridge:
             data = self.tg.download(file["file_id"])
             name = file.get("file_name") or FILE_NAMES[kind].format(datetime.fromtimestamp(sent_at, self.schedules.tz))
             name = re.sub(r"[^\w.\- ]+", "_", Path(name).name).strip() or "file"
-            RECEIVED_DIR.mkdir(exist_ok=True)
-            local = RECEIVED_DIR / name
+            # An album's photos arrive at once, often with the same name: each gets its own folder here.
+            staging = RECEIVED_DIR / secrets.token_hex(4)
+            staging.mkdir(parents=True)
+            local = staging / name
             local.write_bytes(data)
             try:
                 path = self.device.receive(local)
             finally:
                 local.unlink(missing_ok=True)
+                staging.rmdir()
             note = f"(The owner sent a {kind.replace('_', ' ')}, saved on the phone at {path}.)"
             log.info(f"received a {kind} ({len(data) // 1024} KB) -> {path}")
             if caption:
                 mime = "image/jpeg" if kind == "photo" else file.get("mime_type", "")
                 seen = mime in VIEWABLE_IMAGES and len(data) <= MAX_VIEWED_BYTES
-                images = [f"data:{mime};base64,{base64.b64encode(data).decode()}"] if seen else []
+                images = [viewable(data)] if seen else []
                 self.queue_task(f"{caption}\n\n{note}", sent_at, images)
             else:
                 self.received.append(note)

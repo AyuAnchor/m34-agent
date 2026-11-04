@@ -2,6 +2,7 @@
 and text to voice messages with Gemini's text-to-speech (free tier)."""
 import base64
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,9 @@ VOICE_MODELS = ("gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts")
 VOICE = "Kore"
 SAMPLE_RATE = 24000  # streamed audio is raw 16-bit mono PCM at this rate
 MAX_SPOKEN_CHARS = 3000  # ~3-4 minutes of speech
+# Markdown the AI may leave in what it wants said: emphasis and code marks go, a link keeps its text. Plain
+# [brackets] stay, since Gemini's speech models read them as vocal cues ("[laughs]").
+MARKDOWN = re.compile(r"\[([^\]]*)\]\([^)]*\)|[*_`#~]+")
 
 
 class Transcriber:
@@ -53,10 +57,11 @@ class Voice:
         """Write `text` spoken to `out` (.opus) and return its length in seconds. Tries the next key or
         model when one is out of quota or failing."""
         errors = []
+        text = MARKDOWN.sub(lambda match: match[1] or "", text)[:MAX_SPOKEN_CHARS]
         for model in VOICE_MODELS:
             for number, key in enumerate(self.keys, 1):
                 try:
-                    return self.synthesize(model, key, text[:MAX_SPOKEN_CHARS], style, out)
+                    return self.synthesize(model, key, text, style, out)
                 except RuntimeError as error:
                     errors.append(f"{model} key {number}: {error}")
         raise RuntimeError("; ".join(errors) or "no Gemini key")

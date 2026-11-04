@@ -679,7 +679,11 @@ so a 7 s message is ready in ~3 s; generating first and converting after took ~6
 **Files** you send (up to 20 MB, Telegram's limit for bots) land in `/sdcard/Download/Telegram`, renamed
 if the name is taken, and photos and videos are indexed so Gallery shows them. With a caption ("set this as
 the wallpaper") the caption becomes a task that knows where the file is, and a photo or image is also shown
-to the AI. Without one you get "Saved on the phone: ...", and your next task is told about the file.
+to the AI, shrunk to 1280 px on its longest side, for every step of the task (screenshots are dropped as
+newer ones arrive; your photo isn't). Without one you get "Saved on the phone: ...", and your next task is
+told about the file. Photos of an album arrive together and are saved one at a time, so two with the same
+name both keep theirs (the second gets `_1`). Text sent as a voice reply loses Markdown marks first, so
+`**bold**` isn't read out.
 
 Tasks that use the phone show one live **progress message** that updates with every step. It
 appears with the first action, so plain chat ("hi") just gets the reply, about 0.4 s sooner.
