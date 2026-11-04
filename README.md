@@ -23,7 +23,7 @@ Tested on Galaxy M34, Android 16 (One UI 8.5), Termux 0.118.3, Shizuku 13.6.0.
  Telegram servers  ◄──── bridge.py asks "any new messages?" (long polling, outbound only)
                                 │
                                 ▼
-                       agent.py: the agent loop
+                       agent.py: the agent loop (models.py picks the AI)
                          1. send the chat + tool list to the AI
                          2. AI picks a tool (tap, type, screenshot, ...)
                          3. safety check → run it → add the result to the chat
@@ -44,7 +44,10 @@ Tested on Galaxy M34, Android 16 (One UI 8.5), Termux 0.118.3, Shizuku 13.6.0.
 | **Debian (proot)** | Inside Termux | Normal Linux userland for Python (bridge runs in `~/venv`) |
 | **uiautomator2** | Phone, started by the agent | Persistent automation server for fast screen reading |
 | **bridge.py** | Debian, user `agent` | Talks to Telegram, checks it's you, queues tasks, approvals, progress, runs schedules |
-| **agent.py** | Debian, user `agent` | Agent loop, model fallback, tools, safety rules |
+| **agent.py** | Debian, user `agent` | Agent loop, tool handlers, safety rules, saved routes |
+| **models.py** | Debian, user `agent` | Model list and the router: fallback, hedging, cooldowns |
+| **tools.py** | Debian, user `agent` | System prompt and tool definitions sent to the models |
+| **telegram.py** | Debian, user `agent` | Telegram Bot API client and the reply shown while the AI writes |
 | **device.py** | Debian, user `agent` | Phone actions: numbered screen elements, taps, typing, apps, camera, files |
 | **store.py** | Debian, user `agent` | Memory notes and scheduled tasks (small JSON files) |
 | **commands.py** | Debian, user `agent` | Instant `/commands` that call device actions directly, no AI |
@@ -151,7 +154,7 @@ never as instructions. Only your Telegram messages count.
 
 ### Model fallback
 
-Models are tried in this order (edit `MODELS` in `agent.py`). An optional second Gemini key
+Models are tried in this order (edit `MODELS` in `models.py`). An optional second Gemini key
 (`"gemini#2"` in the config) gets its own row for each Gemini model, tried right after the first
 key. Note that Google's API terms forbid circumventing usage limits, which extra accounts or
 projects used only to multiply free quota can count as; the risk is Google suspending the keys.
@@ -286,7 +289,10 @@ Phone boots
 m34-agent/
 ├── bridge/
 │   ├── bridge.py              Telegram bot, owner check, queue, approvals, scheduler, commands
-│   ├── agent.py               agent loop, tool list, model router, safety rules
+│   ├── telegram.py            Bot API client, streamed reply drafts
+│   ├── agent.py               agent loop, tool handlers, safety rules, saved routes
+│   ├── models.py              model list and router (fallback, hedging, cooldowns)
+│   ├── tools.py               system prompt and tool definitions
 │   ├── device.py              phone actions: numbered elements, taps, apps, camera, files
 │   ├── commands.py            instant /commands that skip the AI
 │   ├── net.py                 shared HTTPS connection pool (IPv4 first, kept warm)
@@ -479,7 +485,7 @@ Put your real keys in the config:
 nano $ROOTFS/home/agent/.config/tg-bridge/config.json
 ```
 
-Device-specific: the first line of `SYSTEM_PROMPT` in `agent.py` names the phone and screen size.
+Device-specific: the prompt describes the phone with facts read from it (`Device.specs` in `device.py`).
 Change it to yours (`adb shell wm size`).
 
 ### 7. Start the bot
@@ -709,7 +715,7 @@ Match originalhost m34 !exec "nc -z -G 2 <tailscale-ip> 8022 >/dev/null 2>&1"
 | Slow on a mobile hotspot | First connection can take a few seconds; later ones reuse a shared pool |
 | Everything a bit slow | Close scrcpy when not watching: its video encoding uses a lot of the phone's CPU |
 | Where did the time go? | The log has `reached the bot ~Ns after sending`, `<model>: HTTP 200 in Ns` per AI call, and `replied Ns after starting` per task |
-| Groq returns 403 / 1010 | Requests need a User-Agent header (already set in `agent.py`) |
+| Groq returns 403 / 1010 | Requests need a User-Agent header (already set in `models.py`) |
 
 ---
 

@@ -18,13 +18,14 @@ from typing import Any, Callable
 
 from PIL import Image, ImageOps
 
-from agent import Agent, Router
+from agent import Agent
+from models import Router
 from commands import QuickCommands, format_telegram, plain
 from device import Device, adb, getprop, is_temporary, ready_to_send
 from imagegen import ImageMaker
-from net import ConnectionPool, multipart
 from speech import Transcriber, Voice
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
+from telegram import Draft, Telegram
 from updater import current_version, self_update
 HOME = Path.home()
 REPO_DIR = Path(__file__).resolve().parent.parent  # the git checkout the bot runs from
@@ -32,12 +33,10 @@ CONFIG_PATH = HOME / ".config/tg-bridge/config.json"
 STATE_DIR = HOME / ".cache/tg-bridge"
 HISTORY_PATH = STATE_DIR / "history.json"
 MAX_HISTORY = 20
-MAX_MESSAGE = 4000
 APPROVAL_TIMEOUT_S = 15 * 60
 PROGRESS_LINES = 8
 OUTAGE_NOTICE_S = 10 * 60  # tell the owner once when the main models have been failing this long
 PROGRESS_EDIT_S = 2.0
-DRAFT_EVERY_S = 0.6  # min gap between draft redraws; each is one API call
 SCHEDULER_TICK_S = 20
 WARM_EVERY_S = 120  # keep a fresh connection to Telegram and each AI provider ready
 ADB_GRACE_S = 6 * 60  # how long after a start to wait for adb before telling the owner
@@ -47,7 +46,6 @@ BATTERY_LOW = 15  # alert below this %
 BATTERY_REARM = 20  # ...and alert again only after it has been back at or above this %
 BATTERY_ALERTED_PATH = STATE_DIR / "battery_alerted"
 OWNER_SCREEN_PATH = Path("/tmp/owner-screen.jpg")
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # bots can't download bigger files from Telegram
 RECEIVED_DIR = STATE_DIR / "received"  # files from the owner, on their way to the phone
 ATTACHMENTS = ("voice", "photo", "video", "video_note", "audio", "document")  # "photo" is a list of sizes
@@ -57,12 +55,6 @@ VIEWED_PX = 1280  # longest side of the AI's copy of a photo; it's re-sent with 
 FILE_NAMES = {"photo": "photo_{:%Y%m%d_%H%M%S}.jpg", "video": "video_{:%Y%m%d_%H%M%S}.mp4",
               "video_note": "video_{:%Y%m%d_%H%M%S}.mp4", "audio": "audio_{:%Y%m%d_%H%M%S}.mp3",
               "document": "file_{:%Y%m%d_%H%M%S}"}
-UPLOAD_KINDS = {  # file suffix -> (Bot API method, form field)
-    **dict.fromkeys((".jpg", ".jpeg", ".png", ".webp"), ("sendPhoto", "photo")),
-    **dict.fromkeys((".mp4", ".mov", ".3gp", ".mkv"), ("sendVideo", "video")),
-    **dict.fromkeys((".m4a", ".mp3", ".aac", ".wav", ".ogg"), ("sendAudio", "audio")),
-    ".opus": ("sendVoice", "voice"),  # Ogg Opus shows as a voice message
-}
 BUILT_IN_COMMANDS = [  # (command, description) shown in /help and Telegram's command menu
     ("status", "What I'm doing right now"),
     ("screen", "Screenshot of the phone, right now"),
@@ -105,116 +97,6 @@ def viewable(data: bytes) -> str:
     return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode()}"
 
 
-def split_message(text: str, limit: int) -> list[str]:
-    """Split text into chunks of at most limit, at line breaks and never inside a <pre> block.
-    A single block over the limit is hard-split."""
-    if len(text) <= limit:
-        return [text]
-    blocks, buffer, inside = [], [], False
-    for line in text.split("\n"):
-        buffer.append(line)
-        inside = (inside or "<pre>" in line) and "</pre>" not in line
-        if not inside:
-            blocks.append("\n".join(buffer))
-            buffer = []
-    if buffer:
-        blocks.append("\n".join(buffer))
-    chunks: list[str] = []
-    current = ""
-    for block in blocks:
-        if len(block) > limit:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks += [block[i:i + limit] for i in range(0, len(block), limit)]
-        elif not current:
-            current = block
-        elif len(current) + 1 + len(block) <= limit:
-            current += "\n" + block
-        else:
-            chunks.append(current)
-            current = block
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-class Telegram:
-    """Bot API client over a shared pool of open connections."""
-
-    def __init__(self, token: str) -> None:
-        self.path = f"/bot{token}"
-        self.pool = ConnectionPool("api.telegram.org")
-
-    def post(self, method: str, body: bytes, content_type: str, http_timeout: float) -> Any:
-        _, _, data = self.pool.request(f"{self.path}/{method}", body, {"Content-Type": content_type}, http_timeout)
-        payload = json.loads(data)
-        if not payload.get("ok"):
-            raise RuntimeError(f"{method} failed: {payload.get('description')}")
-        return payload["result"]
-
-    def call(self, method: str, http_timeout: float = 30, **params: Any) -> Any:
-        return self.post(method, json.dumps(params).encode(), "application/json", http_timeout)
-
-    def send(self, chat_id: int, text: str, **extra: Any) -> None:
-        for chunk in split_message(text or "(empty reply)", MAX_MESSAGE):
-            self.call("sendMessage", chat_id=chat_id, text=chunk, **extra)
-
-    def send_file(self, chat_id: int, path: Path, caption: str) -> None:
-        """Upload a photo, video or any other file (as a document)."""
-        if path.stat().st_size > MAX_UPLOAD_BYTES:
-            raise ValueError(f"{path.name} is over Telegram's 50 MB bot upload limit.")
-        method, field_name = UPLOAD_KINDS.get(path.suffix.lower(), ("sendDocument", "document"))
-        fields = {"chat_id": str(chat_id), "caption": caption[:1000]}
-        body, content_type = multipart(fields, field_name, path.name, path.read_bytes())
-        self.post(method, body, content_type, 300)
-
-    def download(self, file_id: str) -> bytes:
-        file_path = self.call("getFile", file_id=file_id)["file_path"]
-        status, _, data = self.pool.request(f"/file{self.path}/{file_path}", None, {}, 300, method="GET")
-        if status != 200:
-            raise RuntimeError(f"download failed (HTTP {status})")
-        return data
-
-
-class Draft:
-    """A reply shown while the AI writes it (sendMessageDraft). Its own thread sends only the newest text,
-    so the model's stream never waits on Telegram."""
-
-    def __init__(self, tg: Telegram, chat_id: int) -> None:
-        self.tg, self.chat_id = tg, chat_id
-        self.draft_id = secrets.randbelow(2**31 - 1) + 1
-        self.text = self.shown = ""
-        self.changed = threading.Event()
-        self.closed = threading.Event()
-        self.thread = threading.Thread(target=self.send_latest, daemon=True)
-        self.thread.start()
-
-    def update(self, text: str) -> None:
-        self.text = text[:MAX_MESSAGE]
-        self.changed.set()
-
-    def close(self) -> None:
-        """Call before sending the real reply, so a late redraw can't land after it."""
-        self.closed.set()
-        self.changed.set()
-        self.thread.join(timeout=10)
-
-    def send_latest(self) -> None:
-        while self.changed.wait() and not self.closed.is_set():
-            self.changed.clear()
-            text = self.text
-            if text == self.shown:
-                continue
-            try:
-                self.tg.call("sendMessageDraft", http_timeout=10, chat_id=self.chat_id, draft_id=self.draft_id, text=text)
-                self.shown = text
-            except Exception as error:
-                log.debug(f"draft update skipped: {error}")
-            if self.closed.wait(DRAFT_EVERY_S):
-                return
-
-
 class Bridge:
     def __init__(self) -> None:
         self.config = load_json(CONFIG_PATH, {})
@@ -241,6 +123,7 @@ class Bridge:
         self.draft: Draft | None = None  # the reply being written, during a task
         self.device = Device()
         self.quick = QuickCommands(self.device)
+        self.commands = self.command_table()
         self.device_lock = threading.Lock()  # one user of the screen at a time: a task or a quick command
         send_file = lambda path, caption: self.tg.send_file(self.owner, path, caption)
         self.memory = Memory()
@@ -384,6 +267,33 @@ class Bridge:
                 except Exception:
                     log.exception("failed to handle update")
 
+    def command_table(self) -> dict[str, Callable[[], None]]:
+        """Built-in commands without arguments."""
+        def say(make: Callable[[], str], **extra: Any) -> Callable[[], None]:
+            return lambda: self.tg.send(self.owner, make(), **extra)
+
+        return {
+            "/start": say(self.help_text),
+            "/help": say(self.help_text),
+            "/status": say(self.status),
+            "/screen": self.send_screen,
+            "/memory": say(lambda: self.memory.listing() or "I don't remember anything yet."),
+            "/schedules": say(lambda: self.schedules.listing() or "No scheduled tasks."),
+            "/shortcuts": say(lambda: self.shortcuts.listing() or "No shortcuts saved yet."),
+            "/usage": say(self.usage_report, parse_mode="HTML"),
+            "/model": self.offer_models,
+            "/new": self.new_conversation,
+            "/stop": self.stop,
+            "/update": self.update,
+        }
+
+    def offer_models(self) -> None:
+        self.tg.send(self.owner, self.model_choice(), reply_markup={"inline_keyboard": self.model_buttons()})
+
+    def new_conversation(self) -> None:
+        HISTORY_PATH.unlink(missing_ok=True)
+        self.tg.send(self.owner, "Conversation cleared.")
+
     def handle(self, update: dict[str, Any]) -> None:
         if "callback_query" in update:
             self.handle_callback(update["callback_query"])
@@ -400,36 +310,13 @@ class Bridge:
             log.warning(f"ignored message from user {user_id}")
         elif kind:
             threading.Thread(target=self.receive, args=(message, kind, text), daemon=True).start()
-        elif text in ("/start", "/help"):
-            self.tg.send(self.owner, self.help_text())
-        elif text == "/status":
-            start = time.time()
-            self.tg.send(self.owner, self.status())
-            log.info(f"/status answered in {time.time() - start:.1f}s")
-        elif text == "/screen":
-            self.send_screen()
-        elif text == "/memory":
-            self.tg.send(self.owner, self.memory.listing() or "I don't remember anything yet.")
-        elif text == "/schedules":
-            self.tg.send(self.owner, self.schedules.listing() or "No scheduled tasks.")
-        elif text == "/usage":
-            self.tg.send(self.owner, self.usage_report(), parse_mode="HTML")
-        elif text == "/model":
-            self.tg.send(self.owner, self.model_choice(), reply_markup={"inline_keyboard": self.model_buttons()})
-        elif text == "/shortcuts":
-            self.tg.send(self.owner, self.shortcuts.listing() or "No shortcuts saved yet.")
+        elif text in self.commands:
+            self.commands[text]()
         elif text.split()[0] in ("/forget", "/unschedule", "/delshortcut"):
             command, _, number = text.partition(" ")
             store = {"/forget": self.memory, "/unschedule": self.schedules, "/delshortcut": self.shortcuts}[command]
             removed = number.strip().isdigit() and store.remove(int(number))
             self.tg.send(self.owner, "Deleted." if removed else "No such number. Check /memory, /schedules or /shortcuts.")
-        elif text == "/new":
-            HISTORY_PATH.unlink(missing_ok=True)
-            self.tg.send(self.owner, "Conversation cleared.")
-        elif text == "/stop":
-            self.stop()
-        elif text == "/update":
-            self.update()
         elif text.startswith("/") and (name := text[1:].split()[0].split("@")[0].lower()) in self.quick.table:
             self.run_quick(name, text.partition(" ")[2].strip())
         elif text.startswith("/"):  # a typo'd command shouldn't become an AI task
