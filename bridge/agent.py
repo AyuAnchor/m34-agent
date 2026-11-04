@@ -110,13 +110,14 @@ FAILED_RESULTS = (
 )
 OPENAI_KEYS = {"role", "content", "tool_calls", "tool_call_id", "name"}
 
-# Raw adb commands that run without asking: taps, typing, keys, app launches, read-only lookups.
+# Raw adb commands that run without asking: swipes (drags no tool does) and read-only lookups.
 AUTO_PHONE = re.compile(
-    r"^shell (input (tap|swipe|text|keyevent) .+"
-    r"|monkey -p [\w.]+ -c android\.intent\.category\.LAUNCHER 1"
+    r"^shell (input swipe .+"
     r"|pm list packages( -3)?( [\w.]+)?|dumpsys [\w.]+|getprop( [\w.]+)?|wm size"
     r"|settings get (system|global|secure) [\w.]+|ls( -\w+)? /sdcard/[\w./-]*)$"
 )
+# Refused in the phone tool: the dedicated tools do these and also return the new screen and catch repeats.
+TOOL_COMMANDS = re.compile(r"""^shell\s+["']?(input\s+(tap|text|keyevent)|monkey)\b""")
 SHELL_METACHARS = re.compile(r"[;&|`$<>\\\n()]")
 # Commands that only read; run without owner approval when there are no shell metacharacters.
 READ_ONLY_CMDS = frozenset(
@@ -359,8 +360,8 @@ TOOLS = [
     function("send_screenshot", "Send the current screen to the owner.", {"caption": prop("string")}),
     function(
         "phone",
-        "Run a raw adb command, e.g. 'shell dumpsys battery'. Read-only lookups run at once; anything else asks "
-        "the owner. Last resort.",
+        "Run a raw adb command, e.g. 'shell dumpsys battery'. Read-only lookups and swipes run at once; anything "
+        "else asks the owner. Last resort: taps, keys, typing and app launches go through their own tools.",
         {"args": prop("string")},
         ("args",),
     ),
@@ -1337,6 +1338,9 @@ class Agent:
     def phone(self, args: str) -> str:
         if LOCKOUT.search(args):
             return "Blocked: this could cut off remote access to the phone."
+        if TOOL_COMMANDS.match(args.strip()):
+            return ("Not run: use the tap tool (x/y on the 0-1000 scale for any point), key, type_text or open_app "
+                    "instead. They return the new screen.")
         try:
             argv = shlex.split(args)
         except ValueError as error:

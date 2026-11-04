@@ -85,7 +85,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `remember` | Long-term memory notes (`/memory` lists them, `/forget N` deletes one) |
 | `schedule_task`, `list_schedules`, `cancel_schedule` | Run tasks later, once or on repeat |
 | `web_search`, `fetch_url` | Search the web (DuckDuckGo) and read pages as text, without the screen |
-| `phone`, `shell` | Raw adb command / Linux command (for anything else) |
+| `phone`, `shell` | Raw adb command / Linux command (for anything else; `phone` refuses taps, keys, typing and app launches, which have their own tools) |
 | `ask_owner` | Ask you a yes/no question with Approve / Deny buttons (e.g. before signing in) |
 
 ### Why numbered elements?
