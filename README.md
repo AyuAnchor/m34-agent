@@ -155,7 +155,9 @@ Before the reply to a task that used the screen goes out, a second model checks 
 request, the actions taken, the reply and a fresh read of the screen, and answers OK or names a claim
 that no action did and the screen doesn't show ("searched for lofi hindi songs" after only opening
 YouTube). The agent is then told to finish the task or say what didn't happen; a second failed check
-lets the reply through. The check costs ~0.8 s and uses no tools, so the request stays small. Gemini 3.5
+lets the reply through. On a screen the element list can't describe (a game, the camera) the check gets
+the screenshot too and only models that see images are asked; before, a text-only fallback judged an
+empty list and called a game screen black. The check costs ~0.8 s and uses no tools, so the request stays small. Gemini 3.5
 Flash Lite does it: it was right on all 18 test cases (true and false claims, both keys). gpt-oss missed a
 claimed settings change, and Qwen called a results page that was still loading a failed search. Runs
 whose last check failed aren't saved as shortcuts.

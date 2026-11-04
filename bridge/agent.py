@@ -687,15 +687,18 @@ class Router:
         on_text: Callable[[str], None] | None = None,
         tools: bool = True,
         prefer: str = "",
+        vision: bool = False,
     ) -> tuple[dict[str, Any], Model]:
         """Ask the best available model. fast_first tries the quickest models first (a task's first step:
         plain chat ends there); later steps go to the smartest. A model with no answer after HEDGE_S gets
         company: the next model is asked too and the first answer wins. on_text receives a text answer as
         it's written. prefer names a model to try (on any key) before the rest; without it, the owner's
-        /model pick goes first, for the first step too."""
+        /model pick goes first, for the first step too. vision asks only models that see images, for
+        requests where the image is the point (models that don't get the images dropped)."""
         chosen = "" if prefer else self.chosen
         first = prefer or chosen
-        order = sorted(self.models, key=lambda m: (m.fast == 0, m.fast)) if fast_first and not chosen else self.models
+        models = [m for m in self.models if m.vision] if vision else self.models
+        order = sorted(models, key=lambda m: (m.fast == 0, m.fast)) if fast_first and not chosen else models
         order = sorted(order, key=lambda m: m.name != first)
         running: dict[str, tuple[Model, float]] = {}  # label -> (model, when it was asked)
         outcomes: queue.Queue[tuple[Model, dict[str, Any] | None]] = queue.Queue()
@@ -1119,14 +1122,17 @@ class Agent:
         quick model (~1 s), since models sometimes report a step as done that they never did."""
         if not self.claim_device():
             return None
-        screen, _ = self.device.look()
+        screen, image = self.device.look()  # an image only when the list can't describe the screen (games...)
         actions = "\n".join(f"- {text}" for text, _ in done_steps) or "(none)"
-        messages = [
-            {"role": "system", "content": DONE_CHECK_PROMPT},
-            {"role": "user", "content": f"Request: {request}\n\nActions taken:\n{actions}\n\nReply: {reply}\n\n{screen}"},
-        ]
+        text = f"Request: {request}\n\nActions taken:\n{actions}\n\nReply: {reply}\n\n{screen}"
+        content: str | list[dict[str, Any]] = text
+        if image:
+            content = [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": image}}]
+        messages = [{"role": "system", "content": DONE_CHECK_PROMPT}, {"role": "user", "content": content}]
         try:
-            answer, model = self.router.complete(messages, fast_first=True, tools=False, prefer=DONE_CHECKER)
+            answer, model = self.router.complete(
+                messages, fast_first=True, tools=False, prefer=DONE_CHECKER, vision=bool(image)
+            )
         except NoModelAvailable:
             return None
         verdict = (answer.get("content") or "").strip()
