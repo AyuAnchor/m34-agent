@@ -252,7 +252,10 @@ busy spell doesn't bounce the task between models. A used-up **daily** quota is 
 40 s timeout. So when a model hasn't answered within 5 s, another model is asked too and the first
 answer wins, up to 3 at once. That backup comes from another provider when one is free, since
 overload and 503s hit all of a provider's models together (usually NVIDIA's Nemotron backs up Gemini;
-Groq's 8K tokens a minute rarely fits a ~4-6K token step). A model that loses this race, or takes over 25 s,
+Groq takes 7,000 input tokens a minute per model, so it fits one or two steps a minute at most). A step
+with a screenshot came to 7,024 tokens, ~3,600 of them the tool list, so Qwen on Groq answered "request
+too large" every time; on such steps it now gets only the screen tools (~800 tokens) and answers in ~0.6 s.
+Qwen3.8-27B scores 82% on AndroidWorld, the phone-control benchmark, one of the best open models. A model that loses this race, or takes over 25 s,
 is asked only after the others for 5 minutes, doubling while it stays slow (up to an hour). If every
 model is briefly rate-limited (back within 20 s), the bot waits rather than giving up.
 
