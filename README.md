@@ -87,7 +87,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `watch_motion`, `listen`, `stop_watch` | Camera watch (any movement, or only someone entering) and sound watch (a baby crying, a dog, an alarm...) in the background (see below) |
 | `remember`, `forget` | Long-term memory notes |
 | `schedule_task`, `list_schedules`, `cancel_schedule` | Run tasks later, once or on repeat |
-| `web_search`, `fetch_url` | Search the web (DuckDuckGo) and read pages as text, without the screen (~1 s) |
+| `web_search`, `fetch_url` | Search the web (DuckDuckGo) and read pages as text, without the screen |
 | `phone`, `shell` | Raw adb command / Linux command (for anything else) |
 | `ask_owner` | Ask you a yes/no question with Approve / Deny buttons (e.g. before signing in) |
 
@@ -98,88 +98,34 @@ buttons and fields, draws a numbered box on each (the "Set-of-Mark" technique), 
 "tap 13" instead of "tap 840, 835". If something has no number (a game, a camera preview), it
 taps on a 0-1000 scale, which is how Gemini models naturally describe positions.
 
-After `tap`, `type_text`, `scroll`, `key`, `open_app`, `open_settings` and `open_url` the new screen comes back
-automatically, so the AI doesn't spend a separate round trip on `look` (about half the AI calls).
-The screen is read only once it's stable (two identical reads in a row, ~250 ms each), so a page that's still
-animating isn't mistaken for "my tap did nothing". A screen with almost no labels (a game, the camera) is
-read once: it goes by its screenshot anyway. When the AI sends several actions at once, the
-screen is read once, after the last one, and a tap by text waits up to 1.5 s for its text to appear.
+After `tap`, `type_text`, `scroll`, `key`, `open_app`, `open_settings` and `open_url` the new screen
+comes back automatically once it stops changing, so the AI doesn't need a separate `look`. The list
+leaves out what's on every screen (status bar, Back/Home/Recents; `key` presses those), and older
+screens are shrunk to just their text.
 
-Each AI step takes a few seconds (~1.2 s on the phone to tap, read and capture, then the model's answer),
-and some things close by themselves in that time: menus, popups, a game's panel for the building just
-tapped. The AI is told to make a tap and its follow-up in one reply (they run ~0.5 s apart; a follow-up by
-x/y waits 0.3 s more for the panel to slide in). After a tap the new screen is compared with the last two
-(element lists, plus 32x32 grey thumbnails of the screenshots when there are any), and the AI is told when
-the tap changed nothing or the screen went back to how it was before its previous action, instead of
-repeating the tap. Seen in Clash of Clans: the AI tapped a building and its panel's Upgrade button by turns,
-the panel closing in between, until the loop check below stopped it.
+The AI can send several actions in one reply, such as a tap and its follow-up before a menu closes.
+The screen is read once, after the last one. A tap by number finds its element again and refuses if
+it's gone. Opening an app, link or Settings page, or a failed action, skips the rest of the batch.
 
-Those actions were all planned on one screen, so the batch is checked as it runs:
+Plain ASCII is typed directly. Other text (Hindi, emoji...) is pasted and read back to check it landed.
+Password fields only take ASCII, so a password never lands in the keyboard's clipboard history.
 
-- A tap by number after an earlier action finds its element again (same label and id) and taps it where
-  it is now, or refuses if it's gone, instead of hitting whatever moved into its place.
-- Opening an app, link or Settings page, or a failed screen action, skips the rest of the batch and
-  shows the new screen.
+The automatic screen includes a screenshot only when the element list is too sparse to go by (games,
+the camera, icon-only buttons). An explicit `look` always includes one. Once a screenshot or your photo
+is part of a task, only models that see images are asked.
 
-`open_url` waits for the page instead of a fixed 2 s pause (~1-1.6 s for an uncached page, all of it
-read). While loading, Chrome shows an empty "Web View" for 0.5-1.5 s, which would otherwise pass as a
-stable screen; a page that stays like that gets a screenshot. Search links for YouTube, the Play Store and
-Maps open straight in the app (one step instead of tapping, typing and submitting: ~7 s instead of ~11 s
-for a YouTube search). The package is always named, since with two handlers Android shows an "Open with"
-chooser.
-
-Plain ASCII is typed with adb's `input text` (~0.3 s). Other text (Hindi, emoji...) is pasted into the
-focused field and the field is read back (~1.5 s); if it doesn't hold the text (Chrome's address bar
-drops a pasted leading space), the AI is told what it shows. Password fields only take ASCII, so a
-password never lands in the keyboard's clipboard history.
-
-That automatic screen comes with a screenshot only when the element list is too sparse to go by
-(fewer than 3 labels, or mostly unlabeled: games, the camera, icon-only buttons). A screenshot
-about doubles the AI's answer time (Flash-Lite: ~2 s instead of ~0.9 s), and most screens read
-fine as a list. An explicit `look` always includes it, so the AI can still see photos, colours or layout.
-The AI's copy is half the width and height (540x1170, ~40 KB instead of ~115 KB), with the numbers drawn
-big enough to stay readable; Nemotron and Flash Lite picked the same numbered box at both sizes in testing.
-The copy sent to you with `/screen` stays full size.
-
-The list leaves out what's on every screen (status bar icons, the Back/Home/Recents buttons, the edge
-panel handle; the `key` tool presses those). A tap by text on a screen with no
-readable text says so ("tap it by x/y on the screenshot") instead of only "not found". Once a screenshot or
-your photo is part of a task, only models that see images are asked, so a text-only backup can't act blind.
-Failed actions and "the screen didn't change" notes are logged, so a loop can be traced afterwards and folds each settings row's title and switch into one
-line with its state (`Eye comfort shield unchecked`). On Settings pages that cuts the list by ~60%.
-
-Older screen lists are compacted to just their text ("earlier screen showed: Android version; 16"):
-the AI keeps the facts it read while the re-sent conversation stays small.
-
-If the same action comes up 3 times in the last 6 steps (repeats or back-and-forth loops), the AI
-is told it's going in circles and to change approach. Taps less than ~25 apart on the 0-1000 scale
-count as the same tap. If it starts repeating again after that warning, the task stops and says
-which action it kept repeating.
-
-Before the reply to a task that used the screen goes out, a second model checks it: it gets the
-request, the actions taken, the reply and a fresh read of the screen, and answers OK or names a claim
-that no action did and the screen doesn't show ("searched for lofi hindi songs" after only opening
-YouTube). The agent is then told to finish the task or say what didn't happen; a second failed check
-lets the reply through. On a screen the element list can't describe (a game, the camera) the check gets
-the screenshot too and only models that see images are asked; before, a text-only fallback judged an
-empty list and called a game screen black. The check costs ~0.8 s and uses no tools, so the request stays small. Gemini 3.5
-Flash Lite does it: it was right on all 18 test cases (true and false claims, both keys). gpt-oss missed a
-claimed settings change, and Qwen called a results page that was still loading a failed search. Runs
-whose last check failed aren't saved as shortcuts.
-
-A reply that claims something was done ("I've sent you a voice note", "I've tapped Deploy troops") when no
-tool ran for the request is caught without a model: the claim is dropped and the agent is told nothing was
-done yet, once. Seen when a quick model saw "I've sent it" earlier in the conversation and simply said it
-again, and when it copied the bot's own "Stopped: I kept repeating..." notice.
+**Loops and false claims.** If the same action comes up 3 times in the last 6 steps, the AI is told
+it's going in circles. If it keeps repeating, the task stops and says which action it repeated. The AI
+is also told when a tap changed nothing. Before the reply to a task that used the screen goes out, a
+second model checks it against the actions taken and a fresh read of the screen. If the reply claims
+something that didn't happen, the agent is told to finish the task or say what didn't happen.
 
 ### Fast screen reading
 
-Android's built-in `uiautomator dump` starts a new process on every call (~3 s). The agent instead
-uses [uiautomator2](https://github.com/openatx/uiautomator2), which keeps a small automation server
-running on the phone: a full `look` (elements + marked screenshot) takes **~0.5 s**. Taps and
-swipes go through the same server (~0.13 s, against ~0.3 s for `input`, which starts a new process
-each time). If the server dies (reboot, adb restart) it is restarted automatically, and the old
-methods are the fallback.
+The agent uses [uiautomator2](https://github.com/openatx/uiautomator2), which keeps a small automation
+server running on the phone, so reading the screen and tapping are much faster than Android's built-in
+`uiautomator dump` and `input`. If the server dies (reboot, adb restart) it restarts automatically, and
+the built-in methods are the fallback.
 
 ### Memory and schedules
 
@@ -224,87 +170,42 @@ projects used only to multiply free quota can count as; the risk is Google suspe
 9. Groq `qwen/qwen3.8-27b` (sees images)
 10. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
 
-The order comes from the log of 30 October to 4 November (195 tasks, 1,245 agent steps). Flash Lite
-decided 43% of the steps and answered 99% of its requests (median 2.3 s, 9 in 10 within 5.1 s), using
-~117 of its 500 a day; Nemotron answered 95% (median 2.7 s, 9 in 10 within 9.4 s, 14 timeouts), so it
-comes right after, as the backup from another provider. `gemini-flash-latest` (Gemini 3.8 Flash) was
-dropped: it answered 9-21% of requests, took a median 14-21 s when it did, and its 37 timeouts were
-most of the time lost to failed requests.
+NVIDIA's models are used only when `"nvidia"` is in the config. NVIDIA calls its free API a trial for
+prototyping and may throttle it when busy. OVHcloud serves Qwen with no account or key, but only 2
+requests a minute per model and IP address, so those models are backups (set `"ovh": false` in the
+config to leave them out).
 
-NVIDIA's models are used only when `"nvidia"` is in the config. Nemotron answered agent steps in ~2 s in
-testing (November 2026), as fast as Flash Lite, with a much larger daily allowance. Other NVIDIA models
-that see images (DeepSeek V4.1 Flash, Gemma 4) often took over 40 s, so they aren't used. NVIDIA calls
-its free API a trial for prototyping and may throttle it when busy.
+**Fast first step.** A task's first step goes to the quickest models (Groq `gpt-oss-120b`, then Groq
+`qwen`), so plain chat ("hi", a quick question) is answered in about a second. If the quick model
+refuses, the step goes to the main models. If the task needs the phone, the following steps go to the
+smartest available model (Gemini first).
 
-OVHcloud's AI Endpoints serve Qwen anonymously: no account and no key, 2 requests a minute per model and
-IP address (set `"ovh": false` in the config to leave them out). Qwen3.8-27B scores 82% on AndroidWorld,
-the phone-control benchmark; both models got all 8 test steps right (timer, tapping an icon on a
-screenshot) in 2-7 s with low thinking (default thinking took up to 36 s). The 2-a-minute limit makes
-them backups, not main models: when they're used up the router waits out OVHcloud's retry hint and
-the others carry on.
+**Limits and errors.** When a model hits a limit or its provider is busy, the next one continues the
+same task. The progress message shows the reason, e.g. `flash-lite (flash busy at Google since 00:48)`,
+and you get a message only if the main models keep failing for 10 minutes. Rate limits follow the
+provider's "retry in N seconds" hint. Server and network errors back off 1, 2, 4... minutes (up to 15).
+A used-up **daily** quota is retried hourly. If every model is briefly rate-limited, the bot waits
+rather than giving up.
 
-Each model has its own daily quota, so a model is listed once under one name: Google's deprecated
-IDs (`gemini-3.7-flash`, `gemini-3.5-flash`) and the `-latest` aliases share quota with the model
-they point to. Gemma 4 on the Gemini API returned server errors or timed out in testing (November
-2026), so it isn't used.
-
-**Fast first step.** A task's first step goes to the quickest models (Groq `gpt-oss-120b`, then
-Groq `qwen`). Plain chat ("hi", a quick question) ends right there in under a second. If the quick model refuses
-something, the same step goes to the main models instead (they follow the bot's own rules on what's
-allowed, e.g. approved sign-ins). If the task
-needs the phone, the following steps go to the smartest available model (Gemini first). Mixing
-models mid-task is safe: tool calls made by another model get the placeholder "thought signature"
-Gemini requires.
-
-When a model hits a limit or its provider is busy, the next one continues the same task. Instead of
-a message per switch, the progress message shows the reason, e.g. `flash-lite (flash busy at Google
-since 00:48)`, and you get one message only if the main models keep failing for 10 minutes. A rate
-limit follows the provider's own "retry in N seconds" hint when it gives one, so the best model
-comes back quickly. Server errors and network failures back off 1, 2, 4... minutes (up to 15), so a
-busy spell doesn't bounce the task between models. A used-up **daily** quota is retried hourly.
-
-**Slow answers.** Most answers take 1-5 s, but an overloaded model sometimes sends nothing until the
-40 s timeout. So when a model hasn't answered within 5 s, another model is asked too and the first
-answer wins, up to 3 at once. That backup comes from another provider when one is free, since
-overload and 503s hit all of a provider's models together (usually NVIDIA's Nemotron backs up Gemini;
-Groq takes 7,000 input tokens a minute per model, so it fits one or two steps a minute at most). A step
-with a screenshot came to 7,024 tokens, ~3,600 of them the tool list, so Qwen on Groq answered "request
-too large" every time; on such steps it now gets only the screen tools (~800 tokens) and answers in ~0.6 s.
-Qwen3.8-27B scores 82% on AndroidWorld, the phone-control benchmark, one of the best open models. A model that loses this race, or takes over 25 s,
-is asked only after the others for 5 minutes, doubling while it stays slow (up to an hour). If every
-model is briefly rate-limited (back within 20 s), the bot waits rather than giving up.
+**Slow answers.** When a model hasn't answered within 5 s, another model (from another provider when
+possible) is asked too and the first answer wins, up to 3 at once. A model that loses this race, or
+takes over 25 s, is asked only after the others for a while.
 
 **Choosing a model.** `/model` shows a button per model (marked "out for today" or "paused" when it
 can't answer now) plus Auto, the order above. A tapped model is asked first for every step of later
-tasks, the first step too, even after it was slow; the rest still take over when it's out of quota or
-fails, and a backup still joins after 5 s. The choice is kept in `model.json` across restarts.
+tasks. The others still take over when it's out of quota or fails, and a backup still joins after 5 s.
+The choice is kept in `model.json` across restarts.
 
 ### Speed
 
-| What | Typical time |
-|---|---|
-| Simple AI reply ("hi") | ~1 s |
-| One agent step (AI decides + action + new screen) | ~3-4 s |
-| "Model and Android version from Settings" | 7 AI calls, ~40 s |
-| Reading the screen (`look`) | ~0.5 s |
-| Instant `/commands` | ~0.5-1.5 s |
-
-What makes it fast:
-- **Reused connections** (`net.py`): Telegram and AI calls share open HTTPS connections.
-  A new one costs 1-6 s on a mobile hotspot; a reused one ~0.2 s. A background thread
-  refreshes one connection per service every 2 minutes so the first message after a quiet
-  spell is fast too.
-- **IPv4 first**: some hotspots silently drop IPv6, which stalled new connections ~35 s.
-- **DNS**: lookups are cached for 5 minutes in the bot, and Debian's resolver retries after 1 s
-  instead of 5 s (`debian/resolv.conf`). A single lost DNS packet on a hotspot used to add 5 s
-  to a reply. (Groq drops idle connections within ~30 s, so its reconnects rely on the cache.)
+Each step of a phone task takes a few seconds. What makes it fast:
+- **Reused connections** (`net.py`): Telegram and AI calls share open HTTPS connections, kept warm.
+- **IPv4 first**: some hotspots silently drop IPv6.
+- **DNS**: lookups are cached for 5 minutes, and Debian's resolver retries after 1 s (`debian/resolv.conf`).
 - **Remembered rate limits**: cooldowns are saved in `cooldowns.json`, so a restart doesn't
   retry models that are out of quota.
 - **Less thinking**: models that support it get `reasoning_effort: low`.
-- **Fast screen reading** with uiautomator2 (see above).
 - **Opened apps are read once loaded**: `open_app` waits (up to 4 s) for the new app's elements.
-  YouTube shows an empty window for ~1-2 s, which the screen read took as settled, and the AI then
-  spent a step waiting 5 s ("open yt" took 17 s; now ~1.6 s to a readable screen).
 
 ### Web reading
 
@@ -322,35 +223,28 @@ Telegram alert (with whether it's charging); once it's back to 20% it says so an
 
 ### Motion watch
 
-`/watch 10m front` (or "tell me if anything moves in the next 10 minutes") records 15 s clips with
-the camera app, pulls 2 frames per second at 160x90 grey, and compares each frame with the previous
-one. If more than 2% of the picture changes by a noticeable amount, you get a message and the clip
-(at most one alert per minute). The clip sent is a 6 s, 640 px snippet starting 2 s before the
-movement (~0.1-1 MB; a full clip can take minutes to upload from the phone). Clips are deleted right
-after they're checked, so a long watch uses almost no storage (an hour of camera video would be
-~7-8 GB). There's a ~7 s gap between clips while the camera restarts; the screen stays on with the
-camera open while watching. The watch only holds the phone while recording: chat is answered
-immediately, and an AI task that needs the screen runs between clips (the watch pauses meanwhile).
-Maximum watch: 2 hours (continuous recording heats the phone).
-Android blocks background camera access, which is why it uses the camera app instead of capturing
-silently. Tune `MOTION_PIXEL_DIFF` / `MOTION_SHARE` in `device.py` if you get false alarms.
+`/watch 10m front` (or "tell me if anything moves in the next 10 minutes") records short clips with
+the camera app (Android blocks background camera access) and compares frames. If enough of the
+picture changes, you get a message and a short clip (at most one alert per minute). Clips are deleted
+once checked. The screen stays on with the camera open, with a gap of a few seconds between clips.
+Chat is answered meanwhile, and an AI task that needs the screen runs between clips. Maximum watch:
+2 hours (continuous recording heats the phone). Tune `MOTION_PIXEL_DIFF` / `MOTION_SHARE` in
+`device.py` if you get false alarms.
 
 **Only people:** `/watch 1h people` (or "tell me if anyone enters the room") alerts only when a person
-appears, not on light changes, curtains or pets. Each clip's moving frames (or one frame, when nothing
-moved) go through EfficientDet-Lite0 on the phone (~65 ms per frame). You're told once when someone
-enters, not every minute while they stay; after they leave, the next entry alerts again.
+appears (EfficientDet-Lite0 on the phone), not on light changes, curtains or pets. You're told once
+when someone enters, not every minute while they stay.
 
 ### Sound watch
 
 `/listen 8h cry` (or "tell me if the baby cries tonight") listens with the microphone only, so the
-camera and screen stay free for other tasks and a camera watch can run at the same time. One Opus
-recording runs per half hour and is checked every 5 s while it's written, by YAMNet on the phone
-(~14 ms per second of audio). When the sound is heard in 2 half-second windows within 10 s, you get
-a message and the recording from 3 s before it (at most one alert per 2 minutes). Sounds: `cry`,
+camera and screen stay free for other tasks and a camera watch can run at the same time. A sound
+classifier (YAMNet) on the phone checks the recording every few seconds. When it hears the sound, you
+get a message and the recording from just before it (at most one alert per 2 minutes). Sounds: `cry`,
 `scream`, `dog`, `alarm`, `glass`, `door` (doorbell or knock); add more in `SOUNDS` in `watch.py`
 using [YAMNet's class names](https://github.com/tensorflow/models/blob/master/research/audioset/yamnet/yamnet_class_map.csv).
 Maximum: 12 hours. While listening, `/audio` and the AI's `record_audio` are cut from the live
-recording. Nothing is kept: each half-hour recording is deleted once checked.
+recording. Nothing is kept: each recording is deleted once checked.
 
 Both smart watches run fully offline on the phone. They need `ai-edge-litert` in the venv (see
 setup); the two models (~9 MB) are downloaded on first use and checked against pinned hashes.
@@ -360,12 +254,8 @@ setup); the two models (~9 MB) are downloaded on first use and checked against p
 `/play 30m` opens Hill Climb Racing and plays it by itself: it drives each run, closes the "Second
 chance" popup (reviving would play an ad), taps through the results and starts the next run, then
 messages a summary. `/stop` ends it early. It holds the screen the whole time, so tasks and commands
-wait or report busy. Maximum: 3 hours.
-
-It runs fully on the phone through the scrcpy server, not adb screenshots: ~30 frames a second at
-640x294 (decoded by ffmpeg, the newest frame ~20 ms old) and multi-touch injected over a socket, so it
-can hold the pedals down. The car is found by its red body; its tilt (the long axis of the red pixels)
-decides the pedals: gas, let go above 30° nose-up, brake above 50°, looking 0.25 s ahead.
+wait or report busy. Maximum: 3 hours. It reads the screen and holds the pedals through the
+scrcpy server, steering by the tilt of the car's red body.
 
 Menus are tapped only when the screen matches a saved picture of that exact button (`hillclimb_ui/`)
 and the game is the app in front. Anything else (offers, ads, store pages) is never tapped; after 20 s
@@ -391,49 +281,39 @@ won't match and it stops without tapping.
 
 Every agent step is one request, so the two Gemini Flash models cover only a few phone tasks a
 day; the Flash Lite models do most of the work. Gemini limits are per Google Cloud project and reset at
-midnight Pacific time, though quota has come back sooner in practice, so a model that runs out
-is tried again every hour. Groq's daily limit is a rolling 24-hour window that it reports in
-response headers, and `/usage` shows those numbers as Groq gives them. Check Gemini's at
-aistudio.google.com/rate-limit. Free tiers change, so treat these numbers as a snapshot.
+midnight Pacific time. Groq's daily limit is a rolling 24-hour window, and `/usage` shows Groq's own
+numbers. Check Gemini's at aistudio.google.com/rate-limit. Free tiers change, so treat these numbers
+as a snapshot.
 
 ### Shortcuts
 
-When a task finishes without going in circles, the steps that worked are saved, by button text
+When a task finishes without going in circles, the steps that worked are saved by button text
 rather than number (numbers change): `open_app name=settings → tap "About phone" → ...`.
-Requests need at least two keywords, so chat like "hi" never becomes a shortcut, and runs longer than
-8 steps aren't saved (they usually wandered). File paths are saved as "the file from the previous
-step". When a similar request comes in (at least half its keywords in common), the AI gets those steps
-as a hint, so it skips the exploring but still checks each screen. A shorter route for the same
-request replaces the old one.
+Short chat like "hi" and runs longer than 8 steps aren't saved. When a similar request comes in,
+the AI gets those steps as a hint but still checks each screen.
 
 When a request has **exactly the same keywords** as a saved one, the route is **replayed directly**,
-without asking the AI at each step (about 1.3 s saved per step, and fewer free requests used). The AI
-then looks at the final screen once and replies, or carries on if something differs. Replay stops at
-the first step that fails and hands over to the AI. A similar but different request ("record 10
-seconds" vs a saved "record 5 seconds") only gets the hint, never a replay. Routes with a tap by
-coordinates aren't replayed, and shortcuts saved before this feature become replayable the next time
-that request finishes. Calls, SMS, email, shell commands, contacts, memory and schedules
-are never saved. `/shortcuts` lists them, `/delshortcut N` deletes one.
+without asking the AI at each step. The AI then checks the final screen and replies, and takes over
+if a step fails. Routes with a tap by coordinates aren't replayed. Calls, SMS, email, shell commands,
+contacts, memory and schedules are never saved. `/shortcuts` lists them, `/delshortcut N` deletes one.
 
 ### After a reboot
 
 Wireless debugging is trusted per Wi-Fi network: on a new one Android asks "Allow wireless debugging
 on this network?", and nobody can answer that during a reboot. So while the phone is running, the bot
-checks every minute that wireless debugging is on; on a new network it answers that prompt itself
-("Always allow on this network" + Allow) and tells you. Only that exact prompt is answered, never
-"Allow USB debugging?". Any network the phone has been on while running is therefore ready for a
-reboot. If screen control still isn't back 6 minutes after a start, the bot messages you.
+checks every minute that wireless debugging is on. On a new network it answers that prompt itself
+("Always allow on this network" + Allow) and tells you. It never answers "Allow USB debugging?".
+Any network the phone has been on while running is therefore ready for a reboot. If screen control
+still isn't back 6 minutes after a start, the bot messages you.
 
-The same check turns **Wi-Fi** back on if it's off (with no SIM it's the phone's only connection, so
-a mistaken tap on its switch would otherwise cut the bot off), and tells you once it's back. It uses
-adb on the phone itself, which doesn't need a network. If that ever fails, plug in USB and run
+The same check turns **Wi-Fi** back on if it's off (with no SIM it's the phone's only connection),
+and tells you once it's back. If that ever fails, plug in USB and run
 `adb shell cmd wifi set-wifi-enabled enabled`.
 
 **Changing Wi-Fi:** keep a phone hotspot saved on the M34 as a rescue network. If the home Wi-Fi
 changes, turn the hotspot on near the phone; the bot comes online through it, then send
 `/wifi "New network" "password"`. The new network gets trusted automatically. The one case that
 still needs hands: the phone powered on somewhere with no saved network at all.
-
 
 ```
 Phone boots
@@ -521,9 +401,9 @@ adb shell settings put global heads_up_notifications_enabled 0  # no pop-up noti
 ```
 
 Then disable apps the bot doesn't use (undo any with `adb shell pm enable <package>`). Samsung Game
-Booster floats a button over every game whose touch lock swallows all taps (the AI turned it on once);
-the rest are unused helpers taking memory or popping up. Keep the Samsung keyboard, Knox, Game Optimizing
-Service, Find My Mobile, Maps and YouTube.
+Booster floats a button over every game whose touch lock swallows all taps; the rest are unused
+helpers taking memory or popping up. Keep the Samsung keyboard, Knox, Game Optimizing Service,
+Find My Mobile, Maps and YouTube.
 
 ```sh
 for p in com.samsung.android.game.gametools \
@@ -711,9 +591,8 @@ Telegram's "/" menu.
 Commands that change the phone wait their turn: while an AI task or a watch clip is using the
 phone they reply "Busy", so nothing fights over the screen. `/battery`, `/info`, `/screen` and `/status` always work.
 
-Photos take ~7.5 s: the camera opens in ~1 s and needs ~5 s to save a photo (Auto HDR is switched
-off in the camera's settings, which saved ~1 s; it merges several frames per shot). Audio adds ~5 s
-(Termux:API startup). `/say` replies at once and speaks in the background.
+Photos take several seconds while the camera saves them, and audio adds a few seconds for Termux:API
+to start. `/say` replies at once and speaks in the background.
 
 ### AI tasks and control
 
@@ -740,47 +619,31 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 Examples: *"record a 10 second video from the front camera and send it"*,
 *"remember that my name is Ayush"*, *"every day at 9:00 send me the battery level"*.
 
-**Voice notes** go to Groq's `whisper-large-v3` with the Groq key the models already use (~0.3-0.5 s for
-a short note). It was as fast as the turbo model in testing, and heard "सात बजे" as "7 बजे" where turbo
-heard "साथ बजे" ("with o'clock"). The transcript is sent back so you can see what it understood.
+**Voice notes** go to Groq's `whisper-large-v3` with the Groq key the models already use. The
+transcript is sent back so you can see what it understood.
 
 **Voice replies.** Ask for one ("send me a voice note saying good morning in Hindi", "how much battery is
 left? answer in voice") and the answer comes back as a Telegram voice message. The AI's `send_voice` tool
 uses Gemini's free text-to-speech (`gemini-3.8-flash-lite-tts`, then `gemini-3.8-flash-tts`, each on every
-Gemini key) with the voice Kore, in 100+ languages. The audio is streamed into ffmpeg as it's generated,
-so a 7 s message is ready in ~3 s; generating first and converting after took ~6 s (ffmpeg alone needs
-~1 s to start in Debian).
+Gemini key) with the voice Kore, in 100+ languages. Markdown marks are removed first, so `**bold**`
+isn't read out.
 
 **Pictures.** "Generate a photo of a dog" or "make a wallpaper of mountains at sunset" makes a new image
-with FLUX.1 [dev] on NVIDIA's free API (the NVIDIA key the chat models use; ~8 s for 1024x1024, ~15 s for
-the whole task), sends it to you as a photo and keeps a copy in `/sdcard/Pictures/AI` (so "set it as the
-wallpaper" works after). Code: `bridge/imagegen.py`. Gemini's image models have no free tier (429 on the
-first request), and NVIDIA's faster FLUX.1 [schnell] endpoint didn't answer within 3 minutes when tested.
-FLUX.1 [dev]'s licence covers personal, non-commercial use.
+with FLUX.1 [dev] on NVIDIA's free API (the NVIDIA key the chat models use), sends it to you as a photo
+and keeps a copy in `/sdcard/Pictures/AI` (so "set it as the wallpaper" works after). Code:
+`bridge/imagegen.py`. FLUX.1 [dev]'s licence covers personal, non-commercial use.
 
 **Files** you send (up to 20 MB, Telegram's limit for bots) land in `/sdcard/Download/Telegram`, renamed
-if the name is taken, and photos and videos are indexed so Gallery shows them. With a caption ("set this as
-the wallpaper") the caption becomes a task that knows where the file is, and a photo or image is also shown
-to the AI, shrunk to 1280 px on its longest side, for every step of the task (screenshots are dropped as
-newer ones arrive; your photo isn't). Without one you get "Saved on the phone: ...", and your next task is
-told about the file. Photos of an album arrive together and are saved one at a time, so two with the same
-name both keep theirs (the second gets `_1`). Text sent as a voice reply loses Markdown marks first, so
-`**bold**` isn't read out.
+if the name is taken, and photos and videos show up in Gallery. With a caption ("set this as the
+wallpaper") the caption becomes a task that knows where the file is, and a photo is also shown to the
+AI. Without one you get "Saved on the phone: ...", and your next task is told about the file.
 
-Tasks that use the phone show one live **progress message** that updates with every step. It
-appears with the first action, so plain chat ("hi") just gets the reply, about 0.4 s sooner.
+Tasks that use the phone show one live **progress message** that updates with every step. Text
+replies **stream** as the AI writes them (Telegram's `sendMessageDraft`). The AI's Markdown is
+rendered as Telegram HTML; if Telegram rejects the formatting, the reply is resent as plain text.
 
-Text replies **stream** as the AI writes them: the bridge asks the models for a streamed answer and
-shows it growing in the chat (Telegram's `sendMessageDraft`, redrawn at most every 0.6 s), then
-sends the finished reply as a normal message. Text a model writes before an action is cleared.
-
-Replies are formatted: the AI's Markdown is rendered as Telegram HTML (bold, italics, `code`,
-links, bullet points), tables and code blocks become aligned monospace blocks, and headings become
-bold. If Telegram rejects the formatting the reply is resent as plain text.
-
-The AI is given the phone's fixed specs (model, Android and One UI version, chipset, total RAM and
-storage, screen size) in its prompt, so it answers questions about the phone from fact instead of
-guessing. Live values (free space, battery) are still read with phone_status.
+The AI knows the phone's fixed specs (model, Android version, chipset, RAM, storage, screen size)
+from its prompt. Live values (free space, battery) are read with `phone_status`.
 
 ### Logs
 
@@ -858,10 +721,10 @@ internet.
 **Which path is used.** `ssh m34` and `m34` always go to the Tailscale address; Tailscale picks the
 route by itself:
 
-| Where the computer and phone are | Path | Speed in testing |
-|---|---|---|
-| Same network (e.g. both on home Wi-Fi) | Tailscale, **direct** over the local network | ~30 ms |
-| Different networks (e.g. computer on a mobile hotspot) | Tailscale, through a **relay** server (a hotspot's NAT blocks a direct path) | ~130-150 ms, ~3 Mbps |
+| Where the computer and phone are | Path |
+|---|---|
+| Same network (e.g. both on home Wi-Fi) | Tailscale, **direct** over the local network (fast) |
+| Different networks (e.g. computer on a mobile hotspot) | Tailscale, through a **relay** server (a hotspot's NAT blocks a direct path; slower) |
 
 Both are encrypted end to end. On a relay, lower scrcpy's quality: `M34_BITRATE=2M M34_MAX_SIZE=1024 m34`.
 Check the current path with `tailscale status` (`direct <ip>` or `relay "<city>"`).
