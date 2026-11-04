@@ -99,8 +99,18 @@ taps on a 0-1000 scale, which is how Gemini models naturally describe positions.
 After `tap`, `type_text`, `scroll`, `key`, `open_app`, `open_settings` and `open_url` the new screen comes back
 automatically, so the AI doesn't spend a separate round trip on `look` (about half the AI calls).
 The screen is read only once it's stable (two identical reads in a row, ~250 ms each), so a page that's still
-animating isn't mistaken for "my tap did nothing". When the AI sends several actions at once, the
+animating isn't mistaken for "my tap did nothing". A screen with almost no labels (a game, the camera) is
+read once: it goes by its screenshot anyway. When the AI sends several actions at once, the
 screen is read once, after the last one, and a tap by text waits up to 1.5 s for its text to appear.
+
+Each AI step takes a few seconds (~1.2 s on the phone to tap, read and capture, then the model's answer),
+and some things close by themselves in that time: menus, popups, a game's panel for the building just
+tapped. The AI is told to make a tap and its follow-up in one reply (they run ~0.5 s apart; a follow-up by
+x/y waits 0.3 s more for the panel to slide in). After a tap the new screen is compared with the last two
+(element lists, plus 32x32 grey thumbnails of the screenshots when there are any), and the AI is told when
+the tap changed nothing or the screen went back to how it was before its previous action, instead of
+repeating the tap. Seen in Clash of Clans: the AI tapped a building and its panel's Upgrade button by turns,
+the panel closing in between, until the loop check below stopped it.
 
 Those actions were all planned on one screen, so the batch is checked as it runs:
 
@@ -125,6 +135,9 @@ That automatic screen comes with a screenshot only when the element list is too 
 (fewer than 3 labels, or mostly unlabeled: games, the camera, icon-only buttons). A screenshot
 about doubles the AI's answer time (Flash-Lite: ~2 s instead of ~0.9 s), and most screens read
 fine as a list. An explicit `look` always includes it, so the AI can still see photos, colours or layout.
+The AI's copy is half the width and height (540x1170, ~40 KB instead of ~115 KB), with the numbers drawn
+big enough to stay readable; Nemotron and Flash Lite picked the same numbered box at both sizes in testing.
+The copy sent to you with `/screen` stays full size.
 
 The list leaves out what's on every screen (status bar icons, the Back/Home/Recents buttons, the edge
 panel handle; the `key` tool presses those) and folds each settings row's title and switch into one

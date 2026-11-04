@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageStat
 
 try:  # persistent UI automation server: ~0.3s per screen read instead of ~3s for `uiautomator dump`
     import uiautomator2
@@ -30,6 +30,9 @@ ADB_DISCONNECTED = re.compile(
 )
 # With Android animations off (see README), a short pause lets the tap register before the stability check.
 ACTION_PAUSE_S = 0.3
+# Extra wait before a tap by x/y that follows another action in the same reply, for what the first one opened
+# to slide in. Taps by text wait for their text instead, and taps by number re-find their element.
+FOLLOW_UP_PAUSE_S = 0.3
 SCREEN_PATH = Path("/tmp/agent-screen.jpg")
 MEDIA_DIR = Path("/tmp/agent-media")
 CAMERA_DIR = "/sdcard/DCIM/Camera"
@@ -37,6 +40,11 @@ RECEIVED_DIR = "/sdcard/Download/Telegram"
 SCREENSHOT_DIR = "/sdcard/DCIM/Screenshots"
 MAX_ELEMENTS = 80
 MIN_LABELED = 3  # fewer labeled elements than this and the AI gets a screenshot with the list
+# The AI's copy of a screenshot is shrunk to this share of the width and height: a quarter of the pixels, so
+# fewer image tokens. (uiautomator2's takeScreenshot ignores its scale argument: it always sends full size.)
+AI_IMAGE_SCALE = 0.5
+THUMB_SIZE = (32, 32)
+SAME_PICTURE_DIFF = 3  # mean grey difference (0-255) between thumbnails below which two screens match
 WIRELESS_DEBUG_PROMPT = "Allow wireless debugging on this network?"
 STABLE_TIMEOUT_S = 2.5
 TEXT_WAIT_S = 1.5  # a tap by text waits this long for its text to show up
@@ -300,6 +308,7 @@ def frame_at(video: Path, seconds: float) -> Image.Image:
 
 
 def to_data_url(image: Image.Image) -> str:
+    image = image.resize((round(image.width * AI_IMAGE_SCALE), round(image.height * AI_IMAGE_SCALE)), Image.LANCZOS)
     buffer = io.BytesIO()
     image.save(buffer, "JPEG", quality=60)
     return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode()}"
@@ -356,6 +365,10 @@ class Device:
         self.changed = False  # something was done since the last look, so the numbered elements may have moved
         self.empty_web_page = False
         self.packages: set[str] = set()  # apps with windows in the last screen read
+        # The last two looks (elements, thumbnail or None), to tell the AI when a tap changed nothing ("same")
+        # or the screen went back to how it was a look earlier ("back"). Cleared at the start of each task.
+        self.looks: list[tuple[list[Element], Image.Image | None]] = []
+        self.screen_note = ""
         self.automator = None
         self.apps: dict[str, str] = {}  # package -> its launcher component
         self._specs = ""
@@ -467,8 +480,11 @@ class Device:
         return image
 
     def read_stable_elements(self) -> list[Element]:
-        """Read the screen until two reads in a row match, so a page transition isn't caught halfway."""
+        """Read the screen until two reads in a row match, so a page transition isn't caught halfway. A screen
+        with almost no labels (a game, the camera) goes by its screenshot, so a second read would only cost time."""
         elements = self.read_elements()
+        if sum(1 for e in elements if e.label) < MIN_LABELED:
+            return elements
         deadline = time.time() + STABLE_TIMEOUT_S
         while time.time() < deadline:  # a read takes ~250 ms, which is gap enough between the two
             again = self.read_elements()
@@ -489,9 +505,27 @@ class Device:
         ]
         listing = "\n".join(lines) or "(no elements found: tap with x/y on the 0-1000 scale)"
         text = f"Elements on screen (tap by number):\n{listing}"
-        if picture or self.unreadable():
-            return text, to_data_url(self.mark(self.snapshot()))
+        image = self.snapshot() if picture or self.unreadable() else None
+        seen = (self.elements, image.convert("L").resize(THUMB_SIZE) if image else None)
+        self.screen_note = (
+            "same" if self.looks and self.matches(seen, self.looks[-1])
+            else "back" if len(self.looks) == 2 and self.matches(seen, self.looks[0])
+            else ""
+        )
+        self.looks = [*self.looks[-1:], seen]
+        if image:
+            return text, to_data_url(self.mark(image))
         return f"{text}\n(No screenshot this time: call look to see the picture.)", None
+
+    def matches(self, seen: tuple[list["Element"], Image.Image | None], earlier: tuple[list["Element"], Image.Image | None]) -> bool:
+        """Whether two looks show the same screen: same elements, and same picture when both have one. Without
+        pictures, too few elements say nothing (a game's list is empty whatever it shows)."""
+        (elements, thumb), (old_elements, old_thumb) = seen, earlier
+        if elements != old_elements:
+            return False
+        if thumb is not None and old_thumb is not None:
+            return ImageStat.Stat(ImageChops.difference(thumb, old_thumb)).mean[0] < SAME_PICTURE_DIFF
+        return len(elements) >= MIN_LABELED
 
     def unreadable(self) -> bool:
         """Too few labels on screen for the element list alone to describe it."""
@@ -502,17 +536,18 @@ class Device:
         """Draw each element's number on the screenshot (Set-of-Mark), skipping full-screen containers."""
         marked = image.copy()
         draw = ImageDraw.Draw(marked)
-        font = ImageFont.load_default(size=30)
+        size = round(20 / AI_IMAGE_SCALE)  # ~20 px tall numbers once shrunk for the AI
+        font = ImageFont.load_default(size=size)
         screen_area = self.width * self.height
         for number, element in enumerate(self.elements, 1):
             x1, y1, x2, y2 = element.box
             if (x2 - x1) * (y2 - y1) > screen_area * 0.5:
                 continue
-            draw.rectangle(element.box, outline=MARK_COLOR, width=3)
+            draw.rectangle(element.box, outline=MARK_COLOR, width=round(3 / AI_IMAGE_SCALE))
             tag = str(number)
-            width = draw.textlength(tag, font=font) + 10
-            draw.rectangle((x1, y1, x1 + width, y1 + 36), fill=MARK_COLOR)
-            draw.text((x1 + 5, y1 + 2), tag, fill="white", font=font)
+            width = draw.textlength(tag, font=font) + size // 3
+            draw.rectangle((x1, y1, x1 + width, y1 + size + size // 5), fill=MARK_COLOR)
+            draw.text((x1 + size // 6, y1 + size // 15), tag, fill="white", font=font)
         return marked
 
     def find_text(self, text: str) -> Element | None:
@@ -563,6 +598,8 @@ class Device:
         elif x is not None and y is not None:
             px, py = round(x / 1000 * self.width), round(y / 1000 * self.height)
             what = f"point ({x:.0f},{y:.0f}) on the 0-1000 scale"
+            if self.changed:
+                time.sleep(FOLLOW_UP_PAUSE_S)
         else:
             return "Give an element number, or x and y on the 0-1000 scale."
         if hold_ms:

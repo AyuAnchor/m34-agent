@@ -75,6 +75,16 @@ CLAIMED = re.compile(
     r"|^Stopped: I kept repeating",
     re.IGNORECASE,
 )
+# Added to a tap's result when the screen after it matches the one before it, or the one before the previous
+# action. Seen in Clash of Clans: a building's panel closed before the next tap, ~4 s later, and the AI
+# tapped the building and the panel's button by turns until the loop check stopped it.
+SCREEN_NOTES = {
+    "same": " The screen is the same as before this tap: it did nothing, or what it opened closed again before "
+    "the screen was read. Don't just tap it again: if it opens something that closes by itself, put the next "
+    "tap in the same reply.",
+    "back": " The screen went back to how it was before your previous action: what that opened closed by itself "
+    "before this tap landed (each of your steps takes a few seconds). Do both taps in one reply.",
+}
 NOTHING_DONE = (
     "No tool has been used for this request, so nothing was done just now. If the owner asked for an action, "
     "do it with the tools; if they're asking about earlier work, answer that without claiming anything new."
@@ -148,6 +158,10 @@ picture itself (photos, colours, where things are). Tap by element number from t
 numbers change after every action.
 - Only when the target has no number, tap with x and y on a 0-1000 scale of the screenshot \
 (0,0 is top-left, 1000,1000 is bottom-right).
+- Each of your steps takes a few seconds, and some things close by themselves in that time (menus, \
+popups, a game's panel for the building you tapped). When a tap opens something you then have to tap in, \
+make both taps in the same reply: they run about half a second apart. The second tap goes by text \
+(text="Upgrade") when you know the label, or by x/y where that button always appears.
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
 settings status, calls, messages, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
@@ -206,7 +220,8 @@ TOOLS = [
     function("look", "See the screen: numbered elements (and a marked screenshot if you see images)."),
     function(
         "tap",
-        "Tap by visible text, element number, or x/y (0-1000). hold_ms long-presses.",
+        "Tap by visible text, element number, or x/y (0-1000). hold_ms long-presses. Several taps in one reply "
+        "run about half a second apart.",
         {
             "text": prop("string"),
             "element": prop("integer"),
@@ -1152,6 +1167,7 @@ class Agent:
         checks = 0
         doubtful = False  # the last check said the screen doesn't show the task done
         nudged = False
+        self.device.looks = []  # screens from an earlier task say nothing about this one's taps
         if replayable:
             done_steps = self.replay(shortcut, messages)
         for step in range(MAX_STEPS):
@@ -1318,7 +1334,8 @@ class Agent:
         result = str(result)[-MAX_TOOL_OUTPUT:]
         if show_screen and name in SHOWS_SCREEN_AFTER:  # saves the AI a separate look round trip (~1-3 s each)
             screen, image = self.device.look()
-            return f"{result}\n\n{screen}", image
+            note = SCREEN_NOTES.get(self.device.screen_note, "") if name == "tap" else ""
+            return f"{result}{note}\n\n{screen}", image
         return result, None
 
     def wait(self, seconds: int) -> str:
