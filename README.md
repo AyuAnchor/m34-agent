@@ -214,16 +214,22 @@ key. Note that Google's API terms forbid circumventing usage limits, which extra
 projects used only to multiply free quota can count as; the risk is Google suspending the keys.
 
 1. `gemini-3-flash-preview` (sees images)
-2. `gemini-flash-latest` (sees images)
-3. `gemini-3.6-flash` (sees images)
+2. `gemini-3.6-flash` (sees images)
+3. `gemini-flash-lite-latest` (sees images)
 4. NVIDIA `nvidia/nemotron-3.5-super-vl-120b-a12b` (sees images)
-5. `gemini-flash-lite-latest` (sees images)
-6. `gemini-3.1-flash-lite` (sees images)
-7. OVHcloud `Qwen3.8-27B` (sees images)
-8. OVHcloud `Qwen3.6-27B` (sees images)
-9. NVIDIA `mistralai/mistral-large-4-1t-a52b` (sees images)
-10. Groq `qwen/qwen3.8-27b` (sees images)
-11. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+5. `gemini-3.1-flash-lite` (sees images)
+6. OVHcloud `Qwen3.8-27B` (sees images)
+7. OVHcloud `Qwen3.6-27B` (sees images)
+8. NVIDIA `mistralai/mistral-large-4-1t-a52b` (sees images)
+9. Groq `qwen/qwen3.8-27b` (sees images)
+10. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+
+The order comes from the log of 30 October to 4 November (195 tasks, 1,245 agent steps). Flash Lite
+decided 43% of the steps and answered 99% of its requests (median 2.3 s, 9 in 10 within 5.1 s), using
+~117 of its 500 a day; Nemotron answered 95% (median 2.7 s, 9 in 10 within 9.4 s, 14 timeouts), so it
+comes right after, as the backup from another provider. `gemini-flash-latest` (Gemini 3.8 Flash) was
+dropped: it answered 9-21% of requests, took a median 14-21 s when it did, and its 37 timeouts were
+most of the time lost to failed requests.
 
 NVIDIA's models are used only when `"nvidia"` is in the config. Nemotron answered agent steps in ~2 s in
 testing (November 2026), as fast as Flash Lite, with a much larger daily allowance. Other NVIDIA models
@@ -372,7 +378,6 @@ won't match and it stops without tapping.
 | Model | Per minute | Tokens / min | Per day |
 |---|---|---|---|
 | Gemini 3 Flash (`gemini-3-flash-preview`) | 5 | 250K | 20 |
-| Gemini 3.8 Flash (`gemini-flash-latest`) | 5 | 250K | 20 |
 | Gemini 3.6 Flash (`gemini-3.6-flash`) | 5 | 250K | 20 |
 | Gemini 3.5 Flash Lite (`gemini-flash-lite-latest`) | 15 | 250K | 500 |
 | Gemini 3.1 Flash Lite (`gemini-3.1-flash-lite`) | 15 | 250K | 500 |
@@ -384,7 +389,7 @@ won't match and it stops without tapping.
 | Gemini 3.8 Flash Lite / Flash TTS (voice replies) | free; limits not published, see AI Studio | - | - |
 | NVIDIA FLUX.1 [dev] (pictures) | free with the NVIDIA key; no separate image limit published | - | - |
 
-Every agent step is one request, so the three Gemini Flash models cover only a few phone tasks a
+Every agent step is one request, so the two Gemini Flash models cover only a few phone tasks a
 day; the Flash Lite models do most of the work. Gemini limits are per Google Cloud project and reset at
 midnight Pacific time, though quota has come back sooner in practice, so a model that runs out
 is tried again every hour. Groq's daily limit is a rolling 24-hour window that it reports in

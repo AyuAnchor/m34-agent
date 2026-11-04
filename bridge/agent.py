@@ -546,13 +546,14 @@ class Model:
 MODELS = [
     Model("gemini", "gemini-3-flash-preview", vision=True, effort="low", daily=20),
     Model("gemini#2", "gemini-3-flash-preview", vision=True, effort="low", daily=20),
-    Model("gemini", "gemini-flash-latest", vision=True, effort="low", daily=20),
-    Model("gemini#2", "gemini-flash-latest", vision=True, effort="low", daily=20),
     Model("gemini", "gemini-3.6-flash", vision=True, effort="low", daily=20),
     Model("gemini#2", "gemini-3.6-flash", vision=True, effort="low", daily=20),
-    Model("nvidia", "nvidia/nemotron-3.5-super-vl-120b-a12b", vision=True, daily=10000),  # NVIDIA's 10K/day is per account
+    # 30 Oct-4 Nov: Flash Lite answered 99% (median 2.3 s, 9 in 10 within 5.1 s, ~117 of its 500 a day used);
+    # Nemotron 95% (2.7 s, 9 in 10 within 9.4 s, 14 timeouts). gemini-flash-latest was dropped: 9-21% answered,
+    # median 14-21 s, 37 timeouts.
     Model("gemini", "gemini-flash-lite-latest", vision=True, daily=500),
     Model("gemini#2", "gemini-flash-lite-latest", vision=True, daily=500),
+    Model("nvidia", "nvidia/nemotron-3.5-super-vl-120b-a12b", vision=True, daily=10000),  # NVIDIA's 10K/day is per account
     Model("gemini", "gemini-3.1-flash-lite", vision=True, daily=500),
     Model("gemini#2", "gemini-3.1-flash-lite", vision=True, daily=500),
     # 82% on AndroidWorld (phone control). Default thinking took up to 36 s for a step; low, 2-7 s.
@@ -564,7 +565,6 @@ MODELS = [
 ]
 TITLES = {
     "gemini-3-flash-preview": "Gemini 3 Flash",
-    "gemini-flash-latest": "Gemini 3.8 Flash",
     "gemini-3.6-flash": "Gemini 3.6 Flash",
     "nvidia/nemotron-3.5-super-vl-120b-a12b": "Nemotron 3.5 Super (NVIDIA)",
     "gemini-flash-lite-latest": "Gemini 3.5 Flash Lite",
