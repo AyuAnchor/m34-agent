@@ -140,11 +140,7 @@ big enough to stay readable; Nemotron and Flash Lite picked the same numbered bo
 The copy sent to you with `/screen` stays full size.
 
 The list leaves out what's on every screen (status bar icons, the Back/Home/Recents buttons, the edge
-panel handle; the `key` tool presses those) and what floats over games: Samsung's Game Booster button and
-Google Play Games' Sidekick tab. On a game's otherwise empty list those were the only things to tap by
-number, and the AI once turned on Game Booster's touch lock that way: it dims the screen and swallows every
-tap until its lock icon is dragged. If that lock shows anyway, the screen read drags it open (a ~1 s drag;
-a quick swipe is ignored) and tells the AI its last tap didn't land. A tap by text on a screen with no
+panel handle; the `key` tool presses those). A tap by text on a screen with no
 readable text says so ("tap it by x/y on the screenshot") instead of only "not found". Once a screenshot or
 your photo is part of a task, only models that see images are asked, so a text-only backup can't act blind.
 Failed actions and "the screen didn't change" notes are logged, so a loop can be traced afterwards and folds each settings row's title and switch into one
@@ -490,7 +486,14 @@ adb shell settings put global ota_disable_automatic_update 1  # no surprise OS u
 adb shell settings put global window_animation_scale 0       # no animations: screens settle faster
 adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
+adb shell pm disable-user --user 0 com.samsung.android.game.gametools  # Samsung Game Booster (see below)
 ```
+
+Game Booster floats a button over every game, and its touch lock (one tap away in its panel) swallows all
+taps until a lock icon is dragged; the AI turned it on once by tapping that button. Undo with
+`adb shell pm enable com.samsung.android.game.gametools`. For the same reason turn off Google Play Games'
+Sidekick tab: Play Store → profile picture → Settings → General → Play Games Sidekick → Show Play Games
+Sidekick off.
 
 Also turn on **Battery protection** (stop charging at 80%) in Settings → Battery.
 A phone kept at 100% for months can swell.
