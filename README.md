@@ -481,19 +481,49 @@ Settings → About phone → tap **Build number** 7 times. Then in Developer opt
 **[computer]** useful 24/7 settings:
 
 ```sh
-adb shell settings put global stay_on_while_plugged_in 7     # screen stays awake while charging
 adb shell settings put global ota_disable_automatic_update 1  # no surprise OS updates
 adb shell settings put global window_animation_scale 0       # no animations: screens settle faster
 adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
-adb shell pm disable-user --user 0 com.samsung.android.game.gametools  # Samsung Game Booster (see below)
+# Screen off after 2 min idle instead of always on (AMOLED burn-in, heat). Tasks, quick commands, the
+# camera and the game autopilot wake it themselves (~1.4 s to wake and read). There must be no lock screen.
+adb shell settings put global stay_on_while_plugged_in 0
+adb shell settings put system screen_off_timeout 120000
+# Android 12+ kills an app's child processes when it thinks there are too many ("signal 9" in Termux);
+# Termux runs ~15 normally, more during watches. The first line stops Google's servers resetting the rest.
+adb shell device_config set_sync_disabled_for_tests persistent
+adb shell device_config put activity_manager max_phantom_processes 2147483647
+adb shell settings put global settings_enable_monitor_phantom_procs false
+adb shell settings put secure edge_enable 0                   # Samsung's edge panel handle on the right
+adb shell settings put global heads_up_notifications_enabled 0  # no pop-up notifications over the screen
 ```
 
-Game Booster floats a button over every game, and its touch lock (one tap away in its panel) swallows all
-taps until a lock icon is dragged; the AI turned it on once by tapping that button. Undo with
-`adb shell pm enable com.samsung.android.game.gametools`. For the same reason turn off Google Play Games'
-Sidekick tab: Play Store → profile picture → Settings → General → Play Games Sidekick → Show Play Games
-Sidekick off.
+Then disable apps the bot doesn't use (undo any with `adb shell pm enable <package>`). Samsung Game
+Booster floats a button over every game whose touch lock swallows all taps (the AI turned it on once);
+the rest are unused helpers taking memory or popping up. Keep the Samsung keyboard, Knox, Game Optimizing
+Service, Find My Mobile, Maps and YouTube.
+
+```sh
+for p in com.samsung.android.game.gametools \
+  com.facebook.appmanager com.facebook.services com.facebook.system \
+  com.microsoft.appmanager com.samsung.android.mdx com.samsung.android.mdx.kit \
+  com.samsung.android.smartsuggestions com.samsung.android.rubin.app \
+  com.samsung.android.bixbyvision.framework com.samsung.android.visionintelligence \
+  com.samsung.android.aremoji com.samsung.android.stickercenter com.samsung.android.app.camera.sticker.facearavatar.preload \
+  com.samsung.android.kidsinstaller com.samsung.android.app.parentalcare \
+  com.samsung.android.samsungpass com.samsung.android.samsungpassautofill com.samsung.android.spayfw \
+  com.sec.android.app.samsungapps com.sec.android.app.billing com.sec.android.easyMover.Agent \
+  com.samsung.android.forest com.samsung.android.scloud com.samsung.android.app.dressroom \
+  com.samsung.android.service.peoplestripe com.samsung.android.app.taskedge com.samsung.android.app.clipboardedge \
+  com.samsung.android.app.watchmanagerstub com.google.android.apps.tachyon com.google.android.projection.gearhead \
+  com.google.ar.core com.google.android.feedback com.google.android.apps.accessibility.voiceaccess \
+  com.google.android.googlequicksearchbox; do adb shell pm disable-user --user 0 $p; done
+adb shell pm uninstall --user 0 com.google.android.apps.bard  # Gemini can't be disabled; undo: pm install-existing
+```
+
+Also turn off Google Play Games' Sidekick tab, which sits over games: Play Store → profile picture →
+Settings → General → Play Games Sidekick → Show Play Games Sidekick off. Check that Settings → Device care →
+Auto optimisation → Auto restart is off, so the phone doesn't reboot on its own.
 
 Also turn on **Battery protection** (stop charging at 80%) in Settings → Battery.
 A phone kept at 100% for months can swell.
