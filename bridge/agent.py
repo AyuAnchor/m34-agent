@@ -545,7 +545,6 @@ MODELS = [
     Model("gemini#2", "gemini-3.1-flash-lite", vision=True, daily=500),
     Model("ovh", "Qwen3.8-27B", vision=True, effort="low"),
     Model("ovh", "Qwen3.6-27B", vision=True, effort="low"),
-    Model("nvidia", "mistralai/mistral-large-4-1t-a52b", vision=True, daily=10000),
     Model("groq", "qwen/qwen3.8-27b", vision=True, fast=2, daily=1000),
     Model("groq", "openai/gpt-oss-120b", vision=False, effort="low", fast=1, daily=1000),
 ]
@@ -555,7 +554,6 @@ TITLES = {
     "nvidia/nemotron-3.5-super-vl-120b-a12b": "Nemotron 3.5 Super (NVIDIA)",
     "gemini-flash-lite-latest": "Gemini 3.5 Flash Lite",
     "gemini-3.1-flash-lite": "Gemini 3.1 Flash Lite",
-    "mistralai/mistral-large-4-1t-a52b": "Mistral Large 4 (NVIDIA)",
     "qwen/qwen3.8-27b": "Qwen 3.8 27B (Groq)",
     "Qwen3.8-27B": "Qwen 3.8 27B (OVHcloud)",
     "Qwen3.6-27B": "Qwen 3.6 27B (OVHcloud)",
@@ -683,12 +681,10 @@ class Router:
         saved = read_json(COOLDOWNS_PATH, {})
         latest = time.time() + DAILY_RECHECK_S
         for model in self.models:
-            entry = saved.get(model.label, 0.0)
+            entry = saved.get(model.label)
             if isinstance(entry, dict):
-                until, model.out_of_quota = entry.get("until", 0.0), bool(entry.get("full"))
-            else:  # legacy format: just the time
-                until = entry
-            model.cooldown_until = max(model.cooldown_until, min(until, latest))
+                model.out_of_quota = bool(entry.get("full"))
+                model.cooldown_until = max(model.cooldown_until, min(entry.get("until", 0.0), latest))
 
     def save_cooldowns(self) -> None:
         now = time.time()

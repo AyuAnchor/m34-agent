@@ -166,9 +166,8 @@ projects used only to multiply free quota can count as; the risk is Google suspe
 5. `gemini-3.1-flash-lite` (sees images)
 6. OVHcloud `Qwen3.8-27B` (sees images)
 7. OVHcloud `Qwen3.6-27B` (sees images)
-8. NVIDIA `mistralai/mistral-large-4-1t-a52b` (sees images)
-9. Groq `qwen/qwen3.8-27b` (sees images)
-10. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+8. Groq `qwen/qwen3.8-27b` (sees images)
+9. Groq `openai/gpt-oss-120b` (text only)
 
 NVIDIA's models are used only when `"nvidia"` is in the config. NVIDIA calls its free API a trial for
 prototyping and may throttle it when busy. OVHcloud serves Qwen with no account or key, but only 2
