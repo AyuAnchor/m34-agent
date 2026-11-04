@@ -26,7 +26,7 @@ PHONE_SERVER = "/data/local/tmp/scrcpy-server-bot.jar"
 DEVICE_NAME_BYTES = 64
 CONNECT_TRIES = 100
 KEY_EVENT, TOUCH_EVENT = 0, 2  # SC_CONTROL_MSG_TYPE_INJECT_KEYCODE, _INJECT_TOUCH_EVENT
-DOWN, UP, MOVE = 0, 1, 2  # AMOTION_EVENT_ACTION_* (key events use the same 0 and 1)
+DOWN, UP = 0, 1  # AMOTION_EVENT_ACTION_* (key events use the same values)
 FULL_PRESSURE = 0xFFFF
 KEYCODE_WAKEUP = 224  # wakes and undims the screen; does nothing else when it's already on
 
@@ -66,7 +66,6 @@ class Screen:
         self.frame_lock = threading.Condition()
         self.frame: np.ndarray | None = None
         self.frame_count = 0
-        self.frame_time = 0.0
         self.size = (0, 0)  # video width, height; touches are sent in this space
         self.screen_size = (0, 0)  # the phone's real pixels, in the current orientation
         self.closed = threading.Event()
@@ -158,7 +157,6 @@ class Screen:
             with self.frame_lock:
                 self.frame = np.frombuffer(data, np.uint8).reshape(height, width, 3)
                 self.frame_count += 1
-                self.frame_time = time.time()
                 self.frame_lock.notify_all()
 
     def wait_frame(self, after: int = 0, timeout: float = 1.0) -> np.ndarray | None:

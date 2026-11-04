@@ -803,7 +803,8 @@ class Bridge:
                 limit, left = model.reported
                 used = f"{limit - left}/{limit}"
             else:
-                used = f"{counts.get(model.label, [0, 0])[0]}/{model.daily}"
+                count = counts.get(model.label, [0, 0])[0]
+                used = f"{count}/{model.daily}" if model.daily else str(count)
             if model.cooldown_until <= now:
                 state = "ready"
             else:
