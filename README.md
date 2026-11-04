@@ -82,7 +82,6 @@ service, so the agent controls the phone like a computer would, without touching
 | `send_voice` | Send you a voice message of any text (Gemini text-to-speech), for "answer in voice" |
 | `generate_image` | Make a new picture from a description (FLUX.1 on NVIDIA), send it to you and keep a copy on the phone |
 | `find_media`, `send_file`, `send_screenshot` | Find photos/videos, send any file or the screen to you |
-| `watch_motion`, `listen`, `stop_watch` | Camera watch (any movement, or only someone entering) and sound watch (a baby crying, a dog, an alarm...) in the background (see below) |
 | `remember` | Long-term memory notes (`/memory` lists them, `/forget N` deletes one) |
 | `schedule_task`, `list_schedules`, `cancel_schedule` | Run tasks later, once or on repeat |
 | `web_search`, `fetch_url` | Search the web (DuckDuckGo) and read pages as text, without the screen |
@@ -218,34 +217,6 @@ Every 2 minutes the bot checks the battery (adb, or Termux:API if adb isn't up).
 Telegram alert (with whether it's charging); once it's back to 20% it says so and re-arms. Change
 `BATTERY_LOW` / `BATTERY_REARM` in `bridge.py`.
 
-### Motion watch
-
-`/watch 10m front` (or "tell me if anything moves in the next 10 minutes") records short clips with
-the camera app (Android blocks background camera access) and compares frames. If enough of the
-picture changes, you get a message and a short clip (at most one alert per minute). Clips are deleted
-once checked. The screen stays on with the camera open, with a gap of a few seconds between clips.
-Chat is answered meanwhile, and an AI task that needs the screen runs between clips. Maximum watch:
-2 hours (continuous recording heats the phone). Tune `MOTION_PIXEL_DIFF` / `MOTION_SHARE` in
-`device.py` if you get false alarms.
-
-**Only people:** `/watch 1h people` (or "tell me if anyone enters the room") alerts only when a person
-appears (EfficientDet-Lite0 on the phone), not on light changes, curtains or pets. You're told once
-when someone enters, not every minute while they stay.
-
-### Sound watch
-
-`/listen 8h cry` (or "tell me if the baby cries tonight") listens with the microphone only, so the
-camera and screen stay free for other tasks and a camera watch can run at the same time. A sound
-classifier (YAMNet) on the phone checks the recording every few seconds. When it hears the sound, you
-get a message and the recording from just before it (at most one alert per 2 minutes). Sounds: `cry`,
-`scream`, `dog`, `alarm`, `glass`, `door` (doorbell or knock); add more in `SOUNDS` in `watch.py`
-using [YAMNet's class names](https://github.com/tensorflow/models/blob/master/research/audioset/yamnet/yamnet_class_map.csv).
-Maximum: 12 hours. While listening, `/audio` and the AI's `record_audio` are cut from the live
-recording. Nothing is kept: each recording is deleted once checked.
-
-Both smart watches run fully offline on the phone. They need `ai-edge-litert` in the venv (see
-setup); the two models (~9 MB) are downloaded on first use and checked against pinned hashes.
-
 ### Free tier limits (October 2026)
 
 | Model | Per minute | Tokens / min | Per day |
@@ -322,8 +293,6 @@ m34-agent/
 │   ├── speech.py              voice notes to text (Groq Whisper), voice replies (Gemini)
 │   ├── imagegen.py            pictures from a description (FLUX.1 on NVIDIA)
 │   ├── store.py               memory notes, scheduled tasks, shortcuts
-│   ├── watch.py               camera watch (clips + frame comparison) and sound watch
-│   ├── detect.py              on-device sound and person recognition (YAMNet, EfficientDet)
 │   ├── web.py                 web search + page reading (public addresses only)
 │   └── config.example.json    bot token + API keys template
 ├── debian/
@@ -366,12 +335,12 @@ adb shell settings put global ota_disable_automatic_update 1  # no surprise OS u
 adb shell settings put global window_animation_scale 0       # no animations: screens settle faster
 adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
-# Screen off after 2 min idle instead of always on (AMOLED burn-in, heat). Tasks, quick commands, the
-# camera and the game autopilot wake it themselves (~1.4 s to wake and read). There must be no lock screen.
+# Screen off after 2 min idle instead of always on (AMOLED burn-in, heat). Tasks, quick commands and
+# the camera wake it themselves. There must be no lock screen.
 adb shell settings put global stay_on_while_plugged_in 0
 adb shell settings put system screen_off_timeout 120000
 # Android 12+ kills an app's child processes when it thinks there are too many ("signal 9" in Termux);
-# Termux runs ~15 normally, more during watches. The first line stops Google's servers resetting the rest.
+# Termux runs ~15. The first line stops Google's servers resetting the rest.
 adb shell device_config set_sync_disabled_for_tests persistent
 adb shell device_config put activity_manager max_phantom_processes 2147483647
 adb shell settings put global settings_enable_monitor_phantom_procs false
@@ -489,7 +458,7 @@ proot-distro install debian
 proot-distro login debian -- bash -c \
   "apt update && apt install -y python3 python3-pil python3-venv adb ffmpeg curl && useradd -m -s /bin/bash agent"
 proot-distro login debian --user agent -- bash -c \
-  "python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install uiautomator2 ai-edge-litert numpy"
+  "python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install uiautomator2"
 ROOTFS=$PREFIX/var/lib/proot-distro/containers/debian/rootfs
 [ -d "$ROOTFS" ] || ROOTFS=$PREFIX/var/lib/proot-distro/installed-rootfs/debian   # older proot-distro
 
@@ -561,8 +530,8 @@ Telegram's "/" menu.
 | `/wifi "Name" "password"` | Join a Wi-Fi network (quotes needed if there are spaces) |
 | `/screenoff`, `/screenon` | Turn the screen off / on (tasks wake it again by themselves) |
 
-Commands that change the phone wait their turn: while an AI task or a watch clip is using the
-phone they reply "Busy", so nothing fights over the screen. `/battery`, `/info`, `/screen` and `/status` always work.
+Commands that change the phone wait their turn: while an AI task is using the phone they reply
+"Busy", so nothing fights over the screen. `/battery`, `/info`, `/screen` and `/status` always work.
 
 Photos take several seconds while the camera saves them, and audio adds a few seconds for Termux:API
 to start. `/say` replies at once and speaks in the background.
@@ -583,9 +552,7 @@ to start. `/say` replies at once and speaks in the background.
 | `/shortcuts`, `/delshortcut N` | see saved shortcuts, delete shortcut N |
 | `/usage` | Table of AI requests per model against the free daily limits (Groq's own numbers), and which models are paused |
 | `/model` | buttons to pick the AI model for tasks, or Auto (the default) |
-| `/watch 10m [front\|back] [people]`, `/unwatch` | message me with a clip if anything moves (or only when someone enters); stop watching |
-| `/listen 8h [cry\|scream\|dog\|alarm\|glass\|door]`, `/unlisten` | message me with a recording when I hear the sound (default `cry`); stop listening |
-| `/stop` | stop the task and watches, and clear the queue |
+| `/stop` | stop the task and clear the queue |
 | `/new` | forget the conversation (memory notes stay) |
 
 Examples: *"record a 10 second video from the front camera and send it"*,
@@ -643,7 +610,7 @@ computer: edit -> commit -> git push  ──►  GitHub (private repo)  ──�
 
 `/update` fetches, fast-forwards, checks that every `bridge/*.py` compiles, then restarts into the new
 code and replies with the commits it pulled. If the new code doesn't compile it stays on the old
-commit. It refuses while a task or watch is running. The phone pulls with a **read-only deploy
+commit. It refuses while a task is running. The phone pulls with a **read-only deploy
 key**, so it can't change the repository or reach your other repos.
 
 Setup on the phone (Debian, user `agent`):

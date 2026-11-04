@@ -19,15 +19,13 @@ from typing import Any, Callable
 from PIL import Image, ImageOps
 
 from agent import Agent, Router
-from commands import QuickCommands, format_telegram, parse_duration, plain
+from commands import QuickCommands, format_telegram, plain
 from device import Device, adb, getprop, is_temporary, ready_to_send
 from imagegen import ImageMaker
 from net import ConnectionPool, multipart
 from speech import Transcriber, Voice
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
 from updater import current_version, self_update
-from watch import SOUNDS, MotionWatch, SoundWatch
-
 HOME = Path.home()
 REPO_DIR = Path(__file__).resolve().parent.parent  # the git checkout the bot runs from
 CONFIG_PATH = HOME / ".config/tg-bridge/config.json"
@@ -74,10 +72,6 @@ BUILT_IN_COMMANDS = [  # (command, description) shown in /help and Telegram's co
     ("shortcuts", "Saved shortcuts (/delshortcut N deletes one)"),
     ("usage", "AI requests today vs the free daily limits"),
     ("model", "Choose the AI model for tasks, or Auto"),
-    ("watch", "Message me if anything moves: /watch 10m [front|back] [people]"),
-    ("unwatch", "Stop the camera watch"),
-    ("listen", f"Message me if I hear a sound: /listen 8h [{'|'.join(SOUNDS)}]"),
-    ("unlisten", "Stop the sound watch"),
     ("new", "Forget the conversation and start fresh"),
     ("stop", "Stop the current task and clear the queue"),
     ("update", "Pull the latest code from GitHub and restart"),
@@ -247,10 +241,8 @@ class Bridge:
         self.draft: Draft | None = None  # the reply being written, during a task
         self.device = Device()
         self.quick = QuickCommands(self.device)
-        self.device_lock = threading.Lock()  # one user of the screen at a time: a task, a quick command or a watch
+        self.device_lock = threading.Lock()  # one user of the screen at a time: a task or a quick command
         send_file = lambda path, caption: self.tg.send_file(self.owner, path, caption)
-        self.watch = MotionWatch(self.device, self.device_lock, self.notify, send_file)
-        self.listener = SoundWatch(self.device, self.notify, send_file)
         self.memory = Memory()
         self.usage = Usage()
         self.schedules = Schedules(getprop("persist.sys.timezone") or "UTC")
@@ -263,8 +255,6 @@ class Bridge:
             self.memory,
             self.schedules,
             self.shortcuts,
-            self.watch,
-            self.listener,
             self.device_lock,
             ask_owner=self.ask_owner,
             send_file=send_file,
@@ -340,7 +330,7 @@ class Bridge:
 
         def run() -> None:
             if command.changes_device and not self.device_lock.acquire(blocking=False):
-                self.tg.send(self.owner, "Busy: a task or motion watch is using the phone. Wait, or /stop it.")
+                self.tg.send(self.owner, "Busy: a task is using the phone. Wait, or /stop it.")
                 return
             start = time.time()
             try:
@@ -441,14 +431,6 @@ class Bridge:
         elif text == "/new":
             HISTORY_PATH.unlink(missing_ok=True)
             self.tg.send(self.owner, "Conversation cleared.")
-        elif text.split()[0] == "/watch":
-            self.tg.send(self.owner, self.start_watch(text.partition(" ")[2]))
-        elif text == "/unwatch":
-            self.tg.send(self.owner, self.watch.stop())
-        elif text.split()[0] == "/listen":
-            self.tg.send(self.owner, self.start_listening(text.partition(" ")[2]))
-        elif text == "/unlisten":
-            self.tg.send(self.owner, self.listener.stop())
         elif text == "/stop":
             self.stop()
         elif text == "/update":
@@ -534,16 +516,15 @@ class Bridge:
 
     def status(self) -> str:
         queued = self.tasks.qsize()
-        watching = "".join(f"\n{w.name.capitalize()}: {w.summary}." for w in (self.watch, self.listener) if w.active)
         if not self.busy:
-            return (f"Idle. {queued} queued." if queued else "Idle.") + watching
+            return f"Idle. {queued} queued." if queued else "Idle."
         last = self.actions[-1] if self.actions else "thinking"
         waiting = "\nWaiting for your approval." if self.approvals else ""
         return (
             f"Working on: {self.task[:300]}\n"
             f"Running {self.elapsed()}, {len(self.actions)} steps, model {self.model or 'starting'}{self.fallback_note()}.\n"
             f"Last action: {last[:200]}{waiting}\n"
-            f"Queued: {queued}{watching}"
+            f"Queued: {queued}"
         )
 
     def send_screen(self) -> None:
@@ -629,8 +610,8 @@ class Bridge:
 
     def update(self) -> None:
         def run() -> None:
-            if self.busy or self.watch.active or self.listener.active:
-                self.tg.send(self.owner, "Busy (a task or watch is running). Send /update again when idle.")
+            if self.busy:
+                self.tg.send(self.owner, "Busy with a task. Send /update again when it's done.")
                 return
             try:
                 result = self_update(REPO_DIR)
@@ -649,26 +630,7 @@ class Bridge:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def start_watch(self, args: str) -> str:
-        words = args.lower().split()
-        duration = next((w for w in words if w not in ("front", "back", "rear", "people")), "5m")
-        seconds = parse_duration(duration, 60)
-        if not seconds:
-            return "Usage: /watch 10m [front|back] [people]  (90s, 10m, 1h; a plain number means minutes)"
-        return self.watch.start(seconds, front="front" in words, people="people" in words)
-
-    def start_listening(self, args: str) -> str:
-        words = args.lower().split()
-        sound = next((w for w in words if w in SOUNDS), "cry")
-        seconds = parse_duration(next((w for w in words if w not in SOUNDS), "1h"), 60)
-        if not seconds:
-            return f"Usage: /listen 8h [{'|'.join(SOUNDS)}]  (30m, 8h; a plain number means minutes)"
-        return self.listener.start(seconds, sound)
-
     def stop(self) -> None:
-        for watch in (self.watch, self.listener):
-            if watch.active:
-                watch.stop()
         while not self.tasks.empty():
             self.tasks.get_nowait()
         if self.busy:

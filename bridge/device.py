@@ -11,7 +11,6 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 from urllib.parse import urlparse
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageStat
@@ -102,11 +101,6 @@ STATUS_SCRIPT = (
     "echo chip=$(getprop ro.board.platform)"
 )
 LARGE_VIDEO_BYTES = 20 * 1024 * 1024  # compress videos above this before sending
-MOTION_FPS = 2
-MOTION_SIZE = (160, 90)
-MOTION_PIXEL_DIFF = 25  # a pixel "changed" if its brightness moves by more than this (0-255)
-MOTION_SHARE = 0.02  # motion if more than 2% of the picture changed since the previous frame
-MOTION_SKIP_S = 1.0  # ignore the first second while the camera settles its exposure
 LAUNCHER = "android.intent.category.LAUNCHER"
 SETTINGS_PAGES = {
     "main": "android.settings.SETTINGS",
@@ -205,15 +199,12 @@ def is_temporary(path: Path) -> bool:
     return path.parent in (MEDIA_DIR, AUDIO_DIR)
 
 
-def compress_video(source: Path, start: float = 0, duration: float | None = None, width: int = 960,
-                   crf: int = 28, audio: bool = True) -> Path:
+def compress_video(source: Path) -> Path:
     """A smaller copy for sending (bots can't send files over 50 MB)."""
     target = source.with_name(f"{source.stem}_small.mp4")
-    trim = ["-ss", f"{start:.1f}", *(["-t", f"{duration:.1f}"] if duration else [])]
-    sound = ["-c:a", "aac", "-b:a", "64k"] if audio else ["-an"]
     subprocess.run(
-        ["ffmpeg", "-loglevel", "error", "-y", *trim, "-i", str(source), "-vf", f"scale={width}:-2",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), *sound, "-movflags", "+faststart", str(target)],
+        ["ffmpeg", "-loglevel", "error", "-y", "-i", str(source), "-vf", "scale=960:-2", "-c:v", "libx264",
+         "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", str(target)],
         check=True, timeout=600,
     )
     return target
@@ -226,27 +217,6 @@ def ready_to_send(path: Path) -> Path:
     return path
 
 
-def motion_moments(video: Path) -> list[float]:
-    """Seconds into a clip where a noticeable share of the picture changed since the previous frame."""
-    width, height = MOTION_SIZE
-    frames = subprocess.run(
-        ["ffmpeg", "-loglevel", "error", "-i", str(video),
-         "-vf", f"fps={MOTION_FPS},scale={width}:{height},format=gray", "-f", "rawvideo", "-"],
-        capture_output=True, timeout=180,
-    ).stdout
-    size = width * height
-    moments, previous = [], None
-    for index in range(len(frames) // size):
-        frame = Image.frombytes("L", MOTION_SIZE, frames[index * size:(index + 1) * size])
-        seconds = index / MOTION_FPS
-        if previous is not None and seconds >= MOTION_SKIP_S:
-            changed = ImageChops.difference(frame, previous).point(lambda v: 255 if v > MOTION_PIXEL_DIFF else 0)
-            if changed.histogram()[255] / size > MOTION_SHARE:
-                moments.append(seconds)
-        previous = frame
-    return moments
-
-
 def start_recorder(path: Path, seconds: int, options: list[str]) -> None:
     """Start a Termux:API microphone recording that stops itself after the given seconds."""
     AUDIO_DIR.mkdir(exist_ok=True)
@@ -256,10 +226,6 @@ def start_recorder(path: Path, seconds: int, options: list[str]) -> None:
         raise RuntimeError(f"Could not start recording: {(started.stdout + started.stderr).strip()}")
 
 
-def stop_recorder() -> None:
-    subprocess.run([MIC_RECORDER, "-q"], capture_output=True, timeout=30)
-
-
 def wait_for_m4a(path: Path) -> Path:
     """Wait until the .m4a is complete, which is once its index ("moov") is written at the end."""
     for _ in range(20):
@@ -267,25 +233,6 @@ def wait_for_m4a(path: Path) -> Path:
             return path
         time.sleep(0.5)
     raise RuntimeError("Recording failed: no complete audio file was written.")
-
-
-def cut_audio(source: Path, start: float, duration: float) -> Path:
-    target = source.with_name(f"{source.stem}_{start:.0f}s.m4a")
-    subprocess.run(
-        ["ffmpeg", "-loglevel", "error", "-y", "-ss", f"{start:.1f}", "-t", f"{duration:.1f}", "-i", str(source),
-         "-c:a", "aac", "-b:a", "64k", str(target)],
-        check=True, timeout=60,
-    )
-    return target
-
-
-def frame_at(video: Path, seconds: float) -> Image.Image:
-    picture = subprocess.run(
-        ["ffmpeg", "-loglevel", "error", "-ss", f"{seconds:.1f}", "-i", str(video), "-frames:v", "1",
-         "-f", "image2pipe", "-c:v", "png", "-"],
-        capture_output=True, check=True, timeout=60,
-    ).stdout
-    return Image.open(io.BytesIO(picture))
 
 
 def to_data_url(image: Image.Image) -> str:
@@ -355,7 +302,6 @@ class Device:
         self.apps: dict[str, str] = {}  # package -> its launcher component
         self._specs = ""
         self.mic_lock = threading.Lock()  # the recorder takes one recording at a time
-        self.live_audio: Callable[[int], Path] | None = None  # set while the sound watch streams the microphone
         match = re.search(r"(\d+)x(\d+)", shell("wm size"))
         self.width, self.height = (int(match[1]), int(match[2])) if match else (1080, 2340)
         self.portrait = (min(self.width, self.height), max(self.width, self.height))
@@ -862,8 +808,6 @@ class Device:
 
     def record_audio_file(self, seconds: int) -> Path:
         """Record from the microphone only (no camera) using Termux:API; return the local file."""
-        if live := self.live_audio:  # the sound watch has the microphone, so cut the recording from its stream
-            return live(seconds)
         with self.mic_lock:
             path = AUDIO_DIR / f"audio_{time.strftime('%Y%m%d_%H%M%S')}.m4a"
             start_recorder(path, seconds, ["-e", "aac", "-b", "96", "-r", "44100"])

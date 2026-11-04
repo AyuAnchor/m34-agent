@@ -17,8 +17,6 @@ from device import GENERATED_DIR, MAX_AUDIO_S, MEDIA_DIR, SCREEN_PATH, SETTINGS_
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
-from watch import SOUNDS, MotionWatch, SoundWatch
-
 log = logging.getLogger("agent")
 
 ENDPOINTS = {  # provider -> (host, path) of its OpenAI-compatible chat endpoint
@@ -53,12 +51,12 @@ MAX_WAIT_S = 120
 REPEAT_LIMIT = 3
 LOOP_WINDOW = 6
 SAME_SPOT = 25  # taps closer than about this on the 0-1000 scale count as repeats
-# These take the phone (device lock) for the rest of the task; other tools never wait for a watch or command.
+# These take the phone (device lock) for the rest of the task; other tools never wait for a quick command.
 SCREEN_TOOLS = {
     "look", "tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url", "take_photo", "record_video",
     "record_audio", "send_screenshot", "phone",
 }
-DEVICE_WAIT_S = 60  # a watch clip or quick command finishes well within this
+DEVICE_WAIT_S = 60  # a quick command finishes well within this
 SHOWS_SCREEN_AFTER = {"tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url"}
 NAVIGATION = {"open_app", "open_settings", "open_url"}
 SCREEN_MARKER = "Elements on screen"
@@ -93,7 +91,7 @@ TAPPED = re.compile(r'^(?:Tapped|Long-pressed) (?:\[\d+\] (.+?)|"(.+?)")\.$', re
 # Never saved into shortcuts: read-only, and anything sensitive or personal.
 SHORTCUT_SKIP = {
     "look", "phone_status", "list_schedules", "remember", "schedule_task", "cancel_schedule", "shell",
-    "watch_motion", "listen", "stop_watch", "ask_owner", "send_voice", "generate_image",
+    "ask_owner", "send_voice", "generate_image",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs aren't worth saving
 MAX_DONE_CHECKS = 2  # after a second failed check the reply goes out anyway (not saved as a route)
@@ -161,7 +159,7 @@ only on apps whose element list shows labels like it; in games, whose element li
 every tap goes by x/y on the screenshot, since there is no text to find.
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
-settings status, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
+settings status). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
 - To search YouTube, the Play Store or Maps, open_url their search link (it opens in the app, one step \
 instead of tapping and typing): https://www.youtube.com/results?search_query=WORDS, \
 https://play.google.com/store/search?q=WORDS&c=apps, https://www.google.com/maps/search/?api=1&query=WORDS.
@@ -329,21 +327,6 @@ TOOLS = [
         },
         ("prompt",),
     ),
-    function(
-        "watch_motion",
-        "Watch with the camera; the owner gets a clip when something moves, or with people=true only when "
-        "someone enters. Runs in the background, so reply right away.",
-        {"seconds": prop("integer", "up to 7200"), "front": prop("boolean"), "people": prop("boolean")},
-        ("seconds",),
-    ),
-    function(
-        "listen",
-        "Listen with the microphone for a sound (e.g. a baby crying); the owner gets a recording when it's "
-        "heard. Runs in the background alongside other tasks, so reply right away.",
-        {"seconds": prop("integer", "up to 43200"), "sound": prop("string", enum=list(SOUNDS))},
-        ("seconds", "sound"),
-    ),
-    function("stop_watch", "Stop the running camera and sound watches."),
     function(
         "web_search",
         "Search the web: titles, links, snippets.",
@@ -975,8 +958,6 @@ class Agent:
         memory: Memory,
         schedules: Schedules,
         shortcuts: Shortcuts,
-        watch: MotionWatch,
-        listener: SoundWatch,
         device_lock: threading.Lock,
         ask_owner: Callable[[str], bool],
         send_file: Callable[[Any, str], None],
@@ -993,8 +974,6 @@ class Agent:
         self.memory = memory
         self.schedules = schedules
         self.shortcuts = shortcuts
-        self.watch = watch
-        self.listener = listener
         self.device_lock = device_lock
         self.holding = False
         self.ask_owner = ask_owner
@@ -1038,11 +1017,6 @@ class Agent:
             "wait": lambda a, m: self.wait(as_int(a.get("seconds")) or 1),
             "take_photo": lambda a, m: self.device.take_photo(as_bool(a.get("front"))),
             "record_video": lambda a, m: self.device.record_video(as_int(a.get("seconds")) or 5, as_bool(a.get("front"))),
-            "watch_motion": lambda a, m: self.watch.start(
-                as_int(a.get("seconds")) or 60, as_bool(a.get("front")), as_bool(a.get("people"))
-            ),
-            "listen": lambda a, m: self.listener.start(as_int(a.get("seconds")) or 3600, str(a.get("sound", ""))),
-            "stop_watch": lambda a, m: f"{self.watch.stop()} {self.listener.stop()}",
             "web_search": lambda a, m: web.search(str(a.get("query", ""))),
             "fetch_url": lambda a, m: web.fetch_text(str(a.get("url", ""))),
             "ask_owner": lambda a, m: (
@@ -1102,7 +1076,7 @@ class Agent:
         return verdict.partition(":")[2].strip() or "the screen doesn't match the reply"
 
     def claim_device(self) -> bool:
-        """Take the phone for the rest of this task, waiting briefly for a watch clip or command to finish."""
+        """Take the phone for the rest of this task, waiting briefly for a quick command to finish."""
         if not self.holding:
             if not self.device_lock.acquire(timeout=DEVICE_WAIT_S):
                 return False
@@ -1288,7 +1262,7 @@ class Agent:
         if self.cancelled():
             return "Cancelled by the owner.", None
         if name in SCREEN_TOOLS and not self.claim_device():
-            return "The phone is busy right now (a motion watch is recording or a command is running). Tell the owner.", None
+            return "The phone is busy right now (a command is running). Tell the owner.", None
         try:
             result = handler(args, model)
         except subprocess.TimeoutExpired:
