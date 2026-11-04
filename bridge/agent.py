@@ -433,6 +433,15 @@ TOOLS = [
     function("list_schedules", "List scheduled tasks."),
     function("cancel_schedule", "Cancel a scheduled task by number.", {"id": prop("integer")}, ("id",)),
 ]
+# Groq's free tier takes 7,000 input tokens a minute per model. A step with a screenshot came to 7,024 with
+# every tool (the list alone is ~3,600), so Qwen answered "request too large" each time; with these ~800.
+SCREEN_STEP_TOOLS = [
+    t for t in TOOLS
+    if t["function"]["name"] in {
+        "look", "tap", "type_text", "key", "scroll", "open_app", "open_url", "open_settings", "wait",
+        "send_screenshot", "send_file",
+    }
+]
 
 
 def as_int(value: Any) -> int | None:
@@ -841,7 +850,8 @@ class Router:
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"model": model.name, "messages": prepare(model, messages)}
         if tools:
-            body["tools"] = TOOLS
+            pictured = model.vision and any(isinstance(m.get("content"), list) for m in messages)
+            body["tools"] = SCREEN_STEP_TOOLS if pictured and model.family == "groq" else TOOLS
         streamed = StreamedReply(on_text) if on_text else None
         if streamed:
             body["stream"] = True
