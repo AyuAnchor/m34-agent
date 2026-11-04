@@ -37,6 +37,7 @@ SCREEN_PATH = Path("/tmp/agent-screen.jpg")
 MEDIA_DIR = Path("/tmp/agent-media")
 CAMERA_DIR = "/sdcard/DCIM/Camera"
 RECEIVED_DIR = "/sdcard/Download/Telegram"
+GENERATED_DIR = "/sdcard/Pictures/AI"
 SCREENSHOT_DIR = "/sdcard/DCIM/Screenshots"
 MAX_ELEMENTS = 80
 MIN_LABELED = 3  # fewer labeled elements than this and the AI gets a screenshot with the list
@@ -1076,15 +1077,15 @@ class Device:
         found.sort(key=lambda path: path.rsplit("/", 1)[-1], reverse=True)  # names start with the date
         return "\n".join(found[: max(1, min(count, 20))]) or f"No {kind} files found."
 
-    def receive(self, local: Path) -> str:
-        """Put a file from the owner in Download/Telegram, renamed if the name is taken, and have it indexed
-        so photos and videos show up in Gallery. One at a time: an album's photos arrive together, and two
-        could otherwise both find the same name free."""
+    def receive(self, local: Path, folder: str = RECEIVED_DIR) -> str:
+        """Put a file in a folder on the phone (a file from the owner: Download/Telegram), renamed if the name
+        is taken, and have it indexed so photos and videos show up in Gallery. One at a time: an album's photos
+        arrive together, and two could otherwise both find the same name free."""
         with self.receive_lock:
-            path = f"{RECEIVED_DIR}/{local.name}"
+            path = f"{folder}/{local.name}"
             number = 1
             while shell(f"[ -e {shlex.quote(path)} ] && echo taken") == "taken":
-                path = f"{RECEIVED_DIR}/{local.stem}_{number}{local.suffix}"
+                path = f"{folder}/{local.stem}_{number}{local.suffix}"
                 number += 1
             result = adb("push", str(local), path, timeout=300)
         if result.returncode != 0:

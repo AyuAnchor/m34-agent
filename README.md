@@ -49,6 +49,7 @@ Tested on Galaxy M34, Android 16 (One UI 8.5), Termux 0.118.3, Shizuku 13.6.0.
 | **store.py** | Debian, user `agent` | Memory notes and scheduled tasks (small JSON files) |
 | **commands.py** | Debian, user `agent` | Instant `/commands` that call device actions directly, no AI |
 | **speech.py** | Debian, user `agent` | Voice notes to text (Groq Whisper), text to voice messages (Gemini) |
+| **imagegen.py** | Debian, user `agent` | Pictures from a description (FLUX.1 [dev] on NVIDIA) |
 | **phone** | Debian | `adb` pointed at the phone itself (`127.0.0.1:5555`) |
 | **runit** | Termux | Keeps the bridge running, restarts it if it crashes |
 | **Termux:Boot** | Android app | Starts everything after a reboot |
@@ -79,6 +80,7 @@ service, so the agent controls the phone like a computer would, without touching
 | `phone_status` | Volumes, brightness, screen timeout, Wi-Fi, airplane mode, Bluetooth, do not disturb, battery, storage, RAM and chipset in one step |
 | `speak` | Say something out loud through the phone's speaker |
 | `send_voice` | Send you a voice message of any text (Gemini text-to-speech), for "answer in voice" |
+| `generate_image` | Make a new picture from a description (FLUX.1 on NVIDIA), send it to you and keep a copy on the phone |
 | `search_contacts` | Find contacts by name or number |
 | `make_call`, `send_sms`, `send_email` | Always ask you first; calls/SMS need a SIM and airplane mode off |
 | `find_media`, `send_file`, `send_screenshot` | Find photos/videos, send any file or the screen to you |
@@ -367,6 +369,7 @@ won't match and it stops without tapping.
 | Groq `qwen/qwen3.8-27b` | ~30 | 8K (7K input) | 1,000 |
 | Groq `whisper-large-v3` (voice notes) | 20 | - | 2,000 (8 h of audio) |
 | Gemini 3.8 Flash Lite / Flash TTS (voice replies) | free; limits not published, see AI Studio | - | - |
+| NVIDIA FLUX.1 [dev] (pictures) | free with the NVIDIA key; no separate image limit published | - | - |
 
 Every agent step is one request, so the three Gemini Flash models cover only a few phone tasks a
 day; the Flash Lite models do most of the work. Gemini limits are per Google Cloud project and reset at
@@ -436,6 +439,7 @@ m34-agent/
 │   ├── commands.py            instant /commands that skip the AI
 │   ├── net.py                 shared HTTPS connection pool (IPv4 first, kept warm)
 │   ├── speech.py              voice notes to text (Groq Whisper), voice replies (Gemini)
+│   ├── imagegen.py            pictures from a description (FLUX.1 on NVIDIA)
 │   ├── store.py               memory notes, scheduled tasks, shortcuts
 │   ├── watch.py               camera watch (clips + frame comparison) and sound watch
 │   ├── detect.py              on-device sound and person recognition (YAMNet, EfficientDet)
@@ -688,6 +692,7 @@ off in the camera's settings, which saved ~1 s; it merges several frames per sho
 | any task in plain words | the agent does it and replies |
 | a voice note | transcribed (any language), shown back as "Heard: ...", then run as a task |
 | "...answer in voice" | the reply comes as a voice message too |
+| "draw / generate a picture of ..." | a new AI image, sent as a photo and kept in Pictures/AI |
 | a photo, video or file | saved on the phone in `Download/Telegram`; its caption, if any, becomes a task about it |
 | `/status` | current task, time, steps, model, queue |
 | `/screen` | instant screenshot, no AI involved |
@@ -715,6 +720,13 @@ uses Gemini's free text-to-speech (`gemini-3.8-flash-lite-tts`, then `gemini-3.8
 Gemini key) with the voice Kore, in 100+ languages. The audio is streamed into ffmpeg as it's generated,
 so a 7 s message is ready in ~3 s; generating first and converting after took ~6 s (ffmpeg alone needs
 ~1 s to start in Debian).
+
+**Pictures.** "Generate a photo of a dog" or "make a wallpaper of mountains at sunset" makes a new image
+with FLUX.1 [dev] on NVIDIA's free API (the NVIDIA key the chat models use; ~8 s for 1024x1024, ~15 s for
+the whole task), sends it to you as a photo and keeps a copy in `/sdcard/Pictures/AI` (so "set it as the
+wallpaper" works after). Code: `bridge/imagegen.py`. Gemini's image models have no free tier (429 on the
+first request), and NVIDIA's faster FLUX.1 [schnell] endpoint didn't answer within 3 minutes when tested.
+FLUX.1 [dev]'s licence covers personal, non-commercial use.
 
 **Files** you send (up to 20 MB, Telegram's limit for bots) land in `/sdcard/Download/Telegram`, renamed
 if the name is taken, and photos and videos are indexed so Gallery shows them. With a caption ("set this as

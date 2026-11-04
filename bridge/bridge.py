@@ -22,6 +22,7 @@ from agent import Agent, Router
 from commands import QuickCommands, format_telegram, parse_duration, plain
 from device import Device, adb, getprop, is_temporary, ready_to_send
 from game import Game
+from imagegen import ImageMaker
 from net import ConnectionPool, multipart
 from speech import Transcriber, Voice
 from store import PACIFIC, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -276,6 +277,7 @@ class Bridge:
             on_text=self.show_draft,
             cancelled=self.cancel.is_set,
             voice=Voice(gemini_keys, router.pools.get("gemini")) if gemini_keys else None,
+            make_image=ImageMaker(providers["nvidia"]) if providers.get("nvidia") else None,
         )
 
     def send_reply(self, text: str) -> None:

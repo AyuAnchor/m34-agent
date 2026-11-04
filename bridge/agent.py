@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from device import MAX_AUDIO_S, MEDIA_DIR, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, is_temporary, phone_line_problem, ready_to_send
+from device import GENERATED_DIR, MAX_AUDIO_S, MEDIA_DIR, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, is_temporary, phone_line_problem, ready_to_send
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -70,6 +70,7 @@ REFUSAL = re.compile(r"\b(I(?:'|’)?m sorry|I can(?:'|’)?t|I cannot|I(?:'|’
 CLAIMED = re.compile(
     r"\b(?:I(?:'|’)?ve|I have|I)(?: just| now| already)? (?:sent|recorded|opened|turned|started|played|called|saved"
     r"|taken|took|scheduled|changed|set|deleted|installed|downloaded|tapped|pressed|typed|entered|clicked|selected"
+    r"|generated|created|drawn"
     r"|deployed|attacked|closed|cleared|paused|stopped|searched|followed|finished|completed|done)\b"
     r"|\b(?:has|have) been (?:sent|set|opened|saved|turned|tapped|deployed|done|completed)\b"
     r"|^Stopped: I kept repeating",
@@ -96,7 +97,7 @@ TAPPED = re.compile(r'^(?:Tapped|Long-pressed) (?:\[\d+\] (.+?)|"(.+?)")\.$', re
 SHORTCUT_SKIP = {
     "look", "phone_status", "list_schedules", "remember", "forget", "schedule_task", "cancel_schedule",
     "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "listen", "stop_watch",
-    "ask_owner", "send_voice",
+    "ask_owner", "send_voice", "generate_image",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs usually wandered; not worth replaying
 MAX_DONE_CHECKS = 2  # after a second failed check the reply goes out anyway (not saved as a route)
@@ -328,6 +329,17 @@ TOOLS = [
             "style": prop("string", "how to say it, e.g. 'cheerful', 'slowly', 'whispering'"),
         },
         ("text",),
+    ),
+    function(
+        "generate_image",
+        "Create a new picture from a description (an AI image model, ~10 s), send it to the owner and keep a copy "
+        "on the phone in Pictures/AI (the path comes back, e.g. to set it as the wallpaper). For when they ask you "
+        "to draw, generate or make an image; not for photos of real things (take_photo, web_search).",
+        {
+            "prompt": prop("string", "a detailed description in English: subject, setting, style, lighting"),
+            "shape": prop("string", "square unless asked; portrait for a phone wallpaper", enum=["square", "portrait", "landscape"]),
+        },
+        ("prompt",),
     ),
     function("search_contacts", "Find contacts by name or number.", {"query": prop("string")}, ("query",)),
     function(
@@ -1016,6 +1028,7 @@ class Agent:
         on_text: Callable[[str], None],
         cancelled: Callable[[], bool],
         voice: Callable[[str, str, Path], float] | None = None,
+        make_image: Callable[[str, str, Path], None] | None = None,
     ) -> None:
         self.router = router
         self.device = device
@@ -1034,6 +1047,7 @@ class Agent:
         self.on_text = on_text
         self.cancelled = cancelled
         self.voice = voice
+        self.make_image = make_image
         self.handlers: dict[str, Callable[[dict[str, Any], Model], str | tuple[str, str | None]]] = {
             "look": lambda a, m: self.device.look(picture=True),
             "tap": lambda a, m: self.device.tap(
@@ -1057,6 +1071,7 @@ class Agent:
             "toggle_setting": lambda a, m: self.device.toggle(str(a.get("setting", "")), as_bool(a.get("on"))),
             "speak": lambda a, m: self.device.speak(str(a.get("text", ""))),
             "send_voice": lambda a, m: self.send_voice(str(a.get("text", "")), str(a.get("style") or "")),
+            "generate_image": lambda a, m: self.generate_image(str(a.get("prompt", "")), str(a.get("shape") or "square")),
             "search_contacts": lambda a, m: self.device.search_contacts(str(a.get("query", ""))),
             "make_call": lambda a, m: phone_line_problem() or self.approved(
                 f"Call {a.get('number')}?", lambda: self.device.make_call(str(a.get("number", "")))
@@ -1385,6 +1400,21 @@ class Agent:
         finally:
             out.unlink(missing_ok=True)
         return f"Sent a {seconds:.0f}s voice message."
+
+    def generate_image(self, prompt: str, shape: str) -> str:
+        if not self.make_image:
+            return "Making images needs an NVIDIA API key (providers.nvidia in the config)."
+        if not prompt.strip():
+            return "Describe the picture to make."
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+        out = MEDIA_DIR / f"ai_{datetime.now(self.schedules.tz):%Y%m%d_%H%M%S}.jpg"
+        try:
+            self.make_image(prompt, shape, out)
+            self.send_file(out, "")
+            saved = self.device.receive(out, GENERATED_DIR)
+        finally:
+            out.unlink(missing_ok=True)
+        return f"Made the picture and sent it to the owner; a copy is on the phone at {saved}."
 
     def send_screenshot(self, caption: str) -> str:
         self.device.snapshot()
