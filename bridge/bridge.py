@@ -35,7 +35,6 @@ MAX_HISTORY = 20
 MAX_MESSAGE = 4000
 APPROVAL_TIMEOUT_S = 15 * 60
 PROGRESS_LINES = 8
-OFFLINE_REPORT_S = 10 * 60  # while Telegram is unreachable, log a reminder this often
 OUTAGE_NOTICE_S = 10 * 60  # tell the owner once when the main models have been failing this long
 PROGRESS_EDIT_S = 2.0
 DRAFT_EVERY_S = 0.6  # min gap between draft redraws; each is one API call
@@ -228,6 +227,7 @@ class Bridge:
         providers = self.config.get("providers", {})
         self.transcribe = Transcriber(providers["groq"]) if providers.get("groq") else None
         self.busy = False
+        self.offline_since = 0.0  # when Telegram stopped answering; 0 while online
         self.cancel = threading.Event()
         self.approvals: dict[str, tuple[threading.Event, list[bool]]] = {}
         self.task = ""
@@ -359,7 +359,6 @@ class Bridge:
 
     def poll(self) -> None:
         offset = 0
-        offline_since = last_report = 0.0
         while True:
             try:
                 updates = self.tg.call(
@@ -369,19 +368,15 @@ class Bridge:
                     timeout=50,
                     allowed_updates=["message", "callback_query"],
                 )
-            except Exception as error:  # the phone's network drops; retry, but log sparingly
-                now = time.time()
-                if not offline_since:
-                    offline_since = last_report = now
+            except Exception as error:  # the phone's network drops; retry, logging once per outage
+                if not self.offline_since:
+                    self.offline_since = time.time()
                     log.warning(f"poll failed: {error}")
-                elif now - last_report >= OFFLINE_REPORT_S:
-                    last_report = now
-                    log.warning(f"still offline after {(now - offline_since) / 60:.0f} min: {error}")
                 time.sleep(5)
                 continue
-            if offline_since:
-                log.info(f"back online after {(time.time() - offline_since) / 60:.1f} min")
-                offline_since = 0.0
+            if self.offline_since:
+                log.info(f"back online after {(time.time() - self.offline_since) / 60:.1f} min")
+                self.offline_since = 0.0
             for update in updates:
                 offset = update["update_id"] + 1
                 try:
@@ -777,7 +772,7 @@ class Bridge:
             except Exception:
                 log.exception("battery check failed")
                 continue
-            if status is None or self.owner is None:
+            if status is None or self.owner is None or self.offline_since:
                 continue
             level, charging = status
             # Marked sent only once delivered, so an undelivered alert is retried.

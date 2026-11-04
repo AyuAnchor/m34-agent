@@ -854,7 +854,7 @@ class Router:
             self.last_failure = f"{model.short} rejected the request"
         model.cooldown_until = time.time() + wait
         self.save_cooldowns()
-        log.warning(f"{model.label} failed ({code}), cooling down {wait:.0f}s: {detail[:300]}")
+        log.warning(f"{model.label} failed ({code}), cooling down {wait:.0f}s: {' '.join(detail.split())[:300]}")
 
 
 def with_thought_signature(call: dict[str, Any]) -> dict[str, Any]:
