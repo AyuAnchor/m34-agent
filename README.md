@@ -246,20 +246,6 @@ recording. Nothing is kept: each recording is deleted once checked.
 Both smart watches run fully offline on the phone. They need `ai-edge-litert` in the venv (see
 setup); the two models (~9 MB) are downloaded on first use and checked against pinned hashes.
 
-### Playing Hill Climb Racing
-
-`/play 30m` opens Hill Climb Racing and plays it by itself: it drives each run, closes the "Second
-chance" popup (reviving would play an ad), taps through the results and starts the next run, then
-messages a summary. `/stop` ends it early. It holds the screen the whole time, so tasks and commands
-wait or report busy. Maximum: 3 hours. It reads the screen and holds the pedals through the
-scrcpy server, steering by the tilt of the car's red body.
-
-Menus are tapped only when the screen matches a saved picture of that exact button (`hillclimb_ui/`)
-and the game is the app in front. Anything else (offers, ads, store pages) is never tapped; after 20 s
-on one it stops and tells you. If another app comes to the front (the screen turns portrait), it
-stops at once. The pictures and positions are for a 2340x1080 screen; on another phone the screens
-won't match and it stops without tapping.
-
 ### Free tier limits (October 2026)
 
 | Model | Per minute | Tokens / min | Per day |
@@ -338,10 +324,6 @@ m34-agent/
 │   ├── store.py               memory notes, scheduled tasks, shortcuts
 │   ├── watch.py               camera watch (clips + frame comparison) and sound watch
 │   ├── detect.py              on-device sound and person recognition (YAMNet, EfficientDet)
-│   ├── game.py                /play: runs the Hill Climb Racing autopilot in the background
-│   ├── hillclimb.py           the autopilot: reads the screen, drives, taps through menus
-│   ├── hillclimb_ui/          saved button pictures the autopilot recognises screens by
-│   ├── scrcpy.py              live screen frames and touch input through the scrcpy server
 │   ├── web.py                 web search + page reading (public addresses only)
 │   └── config.example.json    bot token + API keys template
 ├── debian/
@@ -508,10 +490,6 @@ proot-distro login debian -- bash -c \
   "apt update && apt install -y python3 python3-pil python3-venv adb ffmpeg curl && useradd -m -s /bin/bash agent"
 proot-distro login debian --user agent -- bash -c \
   "python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install uiautomator2 ai-edge-litert numpy"
-proot-distro login debian --user agent -- bash -c \
-  "mkdir -p ~/.cache/tg-bridge && curl -fL -o ~/.cache/tg-bridge/scrcpy-server \
-   https://github.com/Genymobile/scrcpy/releases/download/v4.1/scrcpy-server-v4.1"   # only for /play
-
 ROOTFS=$PREFIX/var/lib/proot-distro/containers/debian/rootfs
 [ -d "$ROOTFS" ] || ROOTFS=$PREFIX/var/lib/proot-distro/installed-rootfs/debian   # older proot-distro
 
@@ -520,7 +498,7 @@ mkdir -p $ROOTFS/home/agent/.android $ROOTFS/home/agent/bridge $ROOTFS/home/agen
 cp ~/.android/adbkey ~/.android/adbkey.pub $ROOTFS/home/agent/.android/   # reuse the approved adb key
 cp $SRC/debian/phone $ROOTFS/usr/local/bin/phone && chmod 755 $ROOTFS/usr/local/bin/phone
 cp $SRC/debian/resolv.conf $ROOTFS/etc/resolv.conf                          # 1s DNS retries
-cp -r $SRC/bridge/*.py $SRC/bridge/hillclimb_ui $ROOTFS/home/agent/bridge/   # or clone the repo: see "Updating the code"
+cp $SRC/bridge/*.py $ROOTFS/home/agent/bridge/   # or clone the repo: see "Updating the code"
 cp $SRC/bridge/config.example.json $ROOTFS/home/agent/.config/tg-bridge/config.json
 proot-distro login debian -- bash -c \
   "chown -R agent:agent /home/agent && chmod 600 /home/agent/.config/tg-bridge/config.json /home/agent/.android/adbkey"
@@ -607,8 +585,7 @@ to start. `/say` replies at once and speaks in the background.
 | `/model` | buttons to pick the AI model for tasks, or Auto (the default) |
 | `/watch 10m [front\|back] [people]`, `/unwatch` | message me with a clip if anything moves (or only when someone enters); stop watching |
 | `/listen 8h [cry\|scream\|dog\|alarm\|glass\|door]`, `/unlisten` | message me with a recording when I hear the sound (default `cry`); stop listening |
-| `/play 30m` | play Hill Climb Racing by itself, then message a summary; `/stop` ends it |
-| `/stop` | stop the task, watches and game, and clear the queue |
+| `/stop` | stop the task and watches, and clear the queue |
 | `/new` | forget the conversation (memory notes stay) |
 
 Examples: *"record a 10 second video from the front camera and send it"*,
