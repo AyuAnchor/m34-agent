@@ -1,6 +1,4 @@
-"""Pictures from a description with FLUX.1 [dev] on NVIDIA's free API (the key the chat models use).
-Gemini's image models have no free tier (429 on the first request), and NVIDIA's FLUX.1 [schnell]
-endpoint didn't answer within 3 minutes in testing (November 2026); [dev] took ~8 s for 1024x1024."""
+"""Pictures from a description with FLUX.1 [dev] on NVIDIA's free API (the key the chat models use)."""
 import base64
 import json
 import secrets

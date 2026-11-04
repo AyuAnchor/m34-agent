@@ -1,7 +1,6 @@
 """Reading the web without the screen: search results and page text for the agent's tools.
 
-Only public internet addresses are fetched. A page could otherwise trick the agent into calling services
-on the phone itself (e.g. the UI automation server) or on the home/Tailscale network.
+Only public internet addresses are fetched, so a page can't steer the agent to services on the phone or local network.
 """
 import html
 import ipaddress

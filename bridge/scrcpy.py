@@ -1,9 +1,6 @@
-"""Live screen frames and instant touches through the scrcpy server, for games.
+"""Live screen frames and multi-touch input through the scrcpy server, for games.
 
-A game needs to see the screen many times a second and hold a finger down for as long as it wants.
-adb screenshots (~290 ms each) and `input` taps (one short tap per process) can do neither, so this
-runs scrcpy's server on the phone: it streams the screen as H.264 (decoded here by ffmpeg) and
-injects multi-touch events over a socket. Protocol: scrcpy 4.1, doc/develop.md.
+The server streams H.264 (decoded here by ffmpeg) and takes touch events over a socket. Protocol: scrcpy 4.1, doc/develop.md.
 """
 import logging
 import secrets
@@ -179,7 +176,7 @@ class Screen:
         self.send(struct.pack(">BBQiiHHHII", TOUCH_EVENT, action, finger, video_x, video_y, width, height, pressure, 0, 0))
 
     def wake(self) -> None:
-        """Undim the screen: Android dims it before sleeping when nothing has been touched for a while."""
+        """Undim the screen, which Android dims before sleeping when nothing is touched."""
         for action in (DOWN, UP):
             self.send(struct.pack(">BBIII", KEY_EVENT, action, KEYCODE_WAKEUP, 0, 0))
 

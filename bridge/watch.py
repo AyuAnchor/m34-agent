@@ -1,7 +1,6 @@
 """Background watches that alert the owner: movement or a person on camera, and sounds on the microphone.
 
-Android blocks background camera access, so frames come from the camera app's own video recording. The
-microphone and the camera can record at the same time, so a camera watch and a sound watch can run together.
+Android blocks background camera access, so frames come from the camera app's own video recording.
 """
 import logging
 import subprocess
@@ -17,21 +16,21 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("watch")
 
-CHUNK_S = 15  # clip length; a ~7 s gap follows each clip while the camera restarts
+CHUNK_S = 15  # clip length; each clip is followed by a gap while the camera restarts
 MIN_CHUNK_S = 3
 ALERT_GAP_S = 60  # at most one alert per minute while something keeps moving
 SNIPPET_S = 6  # length of the clip sent with an alert
 SNIPPET_LEAD_S = 2  # it starts this long before the first movement
 MAX_WATCH_S = 2 * 3600
-PERSON_FRAMES = 3  # frames checked for a person per clip; each costs ~0.4 s
-SEGMENT_S = 1800  # one recording per half hour; starting the next leaves a ~4 s gap
+PERSON_FRAMES = 3  # frames checked for a person per clip
+SEGMENT_S = 1800  # one recording per half hour; starting the next leaves a short gap
 POLL_S = 5  # how often the growing recording is checked
 SOUND_HITS = 2  # windows within SOUND_SPAN_S that must hear it, so a single bang or cough doesn't count
 SOUND_SPAN_S = 10
 SOUND_LEAD_S = 3  # an alert's recording starts this long before the sound was first heard
 SOUND_ALERT_GAP_S = 120
 LIVE_FORMAT = ["-e", "opus", "-b", "32", "-r", "48000", "-c", "1"]  # Ogg can be read while it's being written
-MAX_LISTEN_S = 12 * 3600  # a night; the microphone alone barely warms the phone
+MAX_LISTEN_S = 12 * 3600  # a night
 SOUNDS = {  # name -> (what the owner is told, YAMNet classes that count as it)
     "cry": ("a baby crying", ("Crying, sobbing", "Baby cry, infant cry")),
     "scream": ("screaming", ("Screaming",)),
@@ -160,7 +159,7 @@ class MotionWatch(Watch):
         return next((m for m in moments[::step][:PERSON_FRAMES] if detector.seen(frame_at(clip, m))), None)
 
     def alert(self, clip: Path, moment: float, message: str) -> None:
-        """Send a short, small snippet around the moment; a full clip can take minutes to upload."""
+        """Send a short, small snippet around the moment, since a full clip uploads slowly."""
         snippet = None
         try:
             snippet = compress_video(clip, start=max(0.0, moment - SNIPPET_LEAD_S), duration=SNIPPET_S, width=640, crf=30)
@@ -176,8 +175,7 @@ class MotionWatch(Watch):
 
 
 class SoundWatch(Watch):
-    """Listens with the microphone only: no camera or screen, so tasks keep using the phone meanwhile.
-    One recording runs per segment and is checked every few seconds while it grows."""
+    """Listens with the microphone only, so tasks and a camera watch can use the phone meanwhile."""
 
     name = "sound watch"
 

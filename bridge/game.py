@@ -1,7 +1,6 @@
-"""Playing Hill Climb Racing by itself in the background (the autopilot is in hillclimb.py).
+"""Playing Hill Climb Racing in the background (the autopilot is in hillclimb.py).
 
-The autopilot needs numpy and the scrcpy server, which the rest of the bridge doesn't, so it's
-imported only when a game starts.
+The autopilot needs numpy and the scrcpy server, so it's imported only when a game starts.
 """
 import logging
 import threading
@@ -15,7 +14,7 @@ from watch import Watch, describe
 log = logging.getLogger("game")
 
 MIN_PLAY_S = 60
-MAX_PLAY_S = 3 * 3600  # the phone isn't always charging; a long session drains it fast
+MAX_PLAY_S = 3 * 3600  # a long session drains the battery
 DEVICE_WAIT_S = 60  # a task or command finishing up
 LAUNCH_WAIT_S = 20
 LAUNCH_POLL_S = 1

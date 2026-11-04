@@ -1,7 +1,6 @@
 """On-device recognition with LiteRT: YAMNet for sounds (AudioSet's 521 classes) and EfficientDet-Lite0 for people.
 
-Needs numpy and ai-edge-litert, so it's imported only when a smart watch starts. The models are downloaded once
-and checked against pinned hashes. Measured on the phone: ~14 ms per second of audio, ~65 ms per frame.
+Needs numpy and ai-edge-litert, so it's imported only when a smart watch starts. Models are downloaded once and hash-checked.
 """
 import hashlib
 import io
@@ -26,7 +25,7 @@ THREADS = 2  # Termux gets 3 cores; leave one for the bridge and ffmpeg
 SAMPLE_RATE = 16000
 WINDOW = 15600  # YAMNet hears 0.975 s at a time
 HOP = SAMPLE_RATE // 2
-SOUND_SCORE = 0.3  # tested on ESC-50 cries: real crying scores 0.5-0.9, a fussing, babbling baby stays under 0.2
+SOUND_SCORE = 0.3  # YAMNet class score (0-1) that counts as heard
 PERSON_CLASS = 0  # COCO
 PERSON_SCORE = 0.5
 
@@ -44,7 +43,7 @@ YAMNET = Model(
     "https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite",
     "4d8b4a53282dc83ef04e3e7dbc4fbc98082e34e44ed798e16c3a0cdd4c584faf",
 )
-# MediaPipe's own EfficientDet build leaves box decoding to MediaPipe; this one has it built in.
+# This build has box decoding built in; MediaPipe's own build leaves it to MediaPipe.
 EFFICIENTDET = Model(
     "efficientdet_lite0.tflite",
     "https://www.kaggle.com/api/v1/models/tensorflow/efficientdet/tfLite/lite0-detection-metadata/1/download",
@@ -98,8 +97,7 @@ class SoundDetector:
         self.output = self.model.get_output_details()[0]["index"]
 
     def heard(self, pcm: np.ndarray) -> tuple[list[float], int]:
-        """Seconds into pcm where the sound is heard, and how many samples were used up: the
-        last partial window is left for the next call, so a stream can be checked piece by piece."""
+        """Seconds into pcm where the sound is heard, and samples used up (a last partial window is left for the next call)."""
         found, start = [], 0
         while start + WINDOW <= len(pcm):
             self.model.set_tensor(self.input, pcm[start:start + WINDOW])

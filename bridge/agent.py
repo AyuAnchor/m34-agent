@@ -27,24 +27,21 @@ ENDPOINTS = {  # provider -> (host, path) of its OpenAI-compatible chat endpoint
     "nvidia": ("integrate.api.nvidia.com", "/v1/chat/completions"),
     "ovh": ("oai.endpoints.kepler.ai.cloud.ovh.net", "/v1/chat/completions"),
 }
-# Used without a key unless the config sets the provider to false. OVHcloud's anonymous lane: 2 requests a
-# minute per model and IP address, no account.
+# Used without a key unless the config sets the provider to false; OVHcloud allows 2 requests a minute per model and IP.
 KEYLESS = {"ovh"}
 COOLDOWNS_PATH = STATE_DIR / "cooldowns.json"
 CHOSEN_MODEL_PATH = STATE_DIR / "model.json"  # the owner's pick from /model; none means automatic
-# Quotas used up "per day" free up sooner than the documented reset (Groq's window rolls, and Gemini has
-# answered hours before midnight Pacific), so a full model is tried again after this long.
+# Daily quotas often free up before the documented reset (Groq's window rolls), so a full model is retried after this.
 DAILY_RECHECK_S = 3600
 MAX_TROUBLE_WAIT_S = 900  # server errors and network failures back off 1, 2, 4... minutes, up to this
 TROUBLE_STALE_S = 900  # a problem not seen again for this long counts as over
 PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq", "nvidia": "NVIDIA", "ovh": "OVHcloud"}
-# When a provider is overloaded, a model may still answer but take minutes (seen: 123 s for one step).
+# An overloaded provider may still answer, but only after minutes.
 MODEL_TIMEOUT_S = 40  # give up and try the next model; healthy answers take under ~15 s
 SLOW_ANSWER_S = 25  # an answer slower than this sets the model aside for a while
 SLOW_COOLDOWN_S = 300
 MAX_SLOW_WAIT_S = 3600
-# No answer yet after this long: ask the next model too and take whichever answers first. Flash Lite,
-# which does most steps, answered 9 in 10 within 4.8 s (log, late October); the rest took 10-38 s.
+# No answer after this long: also ask the next model and take whichever answers first. Most answers take under ~5 s.
 HEDGE_S = 5
 MAX_PARALLEL = 3
 SHORT_LIMIT_WAIT_S = 20  # every model cooling down, but one is back within this: wait rather than give up
@@ -56,8 +53,7 @@ MAX_WAIT_S = 120
 REPEAT_LIMIT = 3
 LOOP_WINDOW = 6
 SAME_SPOT = 25  # taps closer than about this on the 0-1000 scale count as repeats
-# Tools that use the screen, camera or microphone take the phone (device lock) for the rest of the task.
-# Chat and everything else never wait for a motion watch or a running command.
+# These take the phone (device lock) for the rest of the task; other tools never wait for a watch or command.
 SCREEN_TOOLS = {
     "look", "tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url", "take_photo", "record_video",
     "record_audio", "send_screenshot", "phone", "make_call", "send_email",
@@ -69,8 +65,7 @@ SCREEN_MARKER = "Elements on screen"
 ELEMENT_LINE = re.compile(r"^\[\d+\] (.*?)(?: #\S+)?(?: (?:checked|unchecked|selected|focused)\b.*)?$")
 MAX_OLD_SCREEN = 1500
 REFUSAL = re.compile(r"\b(I(?:'|’)?m sorry|I can(?:'|’)?t|I cannot|I(?:'|’)?m (?:not able|unable)|I won(?:'|’)?t)\b", re.IGNORECASE)
-# A reply saying something was done, from a model that called no tool. Seen from a quick model: "I've sent you
-# a voice note", "I've tapped DEPLOY TROOPS", and a copy of the bot's own "Stopped: I kept repeating..." notice.
+# A reply claiming an action was done; also matches a copy of the bot's own "Stopped: I kept repeating" notice.
 CLAIMED = re.compile(
     r"\b(?:I(?:'|’)?ve|I have|I)(?: just| now| already)? (?:sent|recorded|opened|turned|started|played|called|saved"
     r"|taken|took|scheduled|changed|set|deleted|installed|downloaded|tapped|pressed|typed|entered|clicked|selected"
@@ -80,9 +75,7 @@ CLAIMED = re.compile(
     r"|^Stopped: I kept repeating",
     re.IGNORECASE,
 )
-# Added to a tap's result when the screen after it matches the one before it, or the one before the previous
-# action. Seen in Clash of Clans: a building's panel closed before the next tap, ~4 s later, and the AI
-# tapped the building and the panel's button by turns until the loop check stopped it.
+# Added to a tap's result when the screen after it matches the one before it, or the one before the previous action.
 SCREEN_NOTES = {
     "same": " The screen is the same as before this tap: it did nothing, or what it opened closed again before "
     "the screen was read. Don't just tap it again: if it opens something that closes by itself, put the next "
@@ -103,7 +96,7 @@ SHORTCUT_SKIP = {
     "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "listen", "stop_watch",
     "ask_owner", "send_voice", "generate_image",
 }
-MAX_SHORTCUT_STEPS = 8  # longer runs usually wandered; not worth replaying
+MAX_SHORTCUT_STEPS = 8  # longer runs aren't worth saving
 MAX_DONE_CHECKS = 2  # after a second failed check the reply goes out anyway (not saved as a route)
 DONE_CHECK_PROMPT = """You check a phone assistant's work before its reply goes to the owner. You get the \
 owner's request, every action the assistant took, its reply, and the phone's screen now. Go through each \
@@ -111,8 +104,6 @@ thing the reply says was done: it counts only if one of the actions did it or th
 an app or a settings page is not doing anything in it: searching, typing, playing or switching a setting \
 needs its own action, or the screen showing the result. Answer in one line: OK if every claim is backed, \
 or WRONG: <the claim that isn't>."""
-# The only model right on every test case (~0.8 s): gpt-oss missed a claimed settings change, Qwen called a
-# still-loading results page a failed search.
 DONE_CHECKER = "gemini-flash-lite-latest"
 PREVIOUS_FILE = "<the file from the previous step>"
 SAVED_FILE = re.compile(r"(/(?:sdcard|storage|data)/\S+?\.\w+)(?=\.?(?:\s|$))")
@@ -130,7 +121,7 @@ AUTO_PHONE = re.compile(
     r"|settings get (system|global|secure) [\w.]+|ls( -\w+)? /sdcard/[\w./-]*)$"
 )
 SHELL_METACHARS = re.compile(r"[;&|`$<>\\\n()]")
-# Shell commands that only read; run without owner approval (no metachars, so a single plain command).
+# Commands that only read; run without owner approval when there are no shell metacharacters.
 READ_ONLY_CMDS = frozenset(
     "ls cat head tail df du free pwd wc grep egrep fgrep stat file find uname whoami date uptime ps "
     "env printenv which type hostname id tree realpath readlink dirname basename uniq cut".split()
@@ -437,8 +428,7 @@ TOOLS = [
     function("list_schedules", "List scheduled tasks."),
     function("cancel_schedule", "Cancel a scheduled task by number.", {"id": prop("integer")}, ("id",)),
 ]
-# Groq's free tier takes 7,000 input tokens a minute per model. A step with a screenshot came to 7,024 with
-# every tool (the list alone is ~3,600), so Qwen answered "request too large" each time; with these ~800.
+# For Groq steps with a screenshot: its free tier takes 7,000 input tokens a minute per model, too few for every tool.
 SCREEN_STEP_TOOLS = [
     t for t in TOOLS
     if t["function"]["name"] in {
@@ -548,15 +538,11 @@ MODELS = [
     Model("gemini#2", "gemini-3-flash-preview", vision=True, effort="low", daily=20),
     Model("gemini", "gemini-3.6-flash", vision=True, effort="low", daily=20),
     Model("gemini#2", "gemini-3.6-flash", vision=True, effort="low", daily=20),
-    # 30 Oct-4 Nov: Flash Lite answered 99% (median 2.3 s, 9 in 10 within 5.1 s, ~117 of its 500 a day used);
-    # Nemotron 95% (2.7 s, 9 in 10 within 9.4 s, 14 timeouts). gemini-flash-latest was dropped: 9-21% answered,
-    # median 14-21 s, 37 timeouts.
     Model("gemini", "gemini-flash-lite-latest", vision=True, daily=500),
     Model("gemini#2", "gemini-flash-lite-latest", vision=True, daily=500),
     Model("nvidia", "nvidia/nemotron-3.5-super-vl-120b-a12b", vision=True, daily=10000),  # NVIDIA's 10K/day is per account
     Model("gemini", "gemini-3.1-flash-lite", vision=True, daily=500),
     Model("gemini#2", "gemini-3.1-flash-lite", vision=True, daily=500),
-    # 82% on AndroidWorld (phone control). Default thinking took up to 36 s for a step; low, 2-7 s.
     Model("ovh", "Qwen3.8-27B", vision=True, effort="low"),
     Model("ovh", "Qwen3.6-27B", vision=True, effort="low"),
     Model("nvidia", "mistralai/mistral-large-4-1t-a52b", vision=True, daily=10000),
@@ -588,8 +574,7 @@ class ProviderError(Exception):
 
 
 class StreamedReply:
-    """Rebuilds a chat message from a streamed (server-sent events) answer, passing the text to on_text as
-    it grows until a tool call shows up (text before a call is a remark, not the reply)."""
+    """Rebuilds a chat message from a server-sent events stream; text goes to on_text until a tool call shows up."""
 
     def __init__(self, on_text: Callable[[str], None]) -> None:
         self.on_text = on_text
@@ -636,8 +621,7 @@ class StreamedReply:
 
 
 class TextGate:
-    """Passes on one model's streamed text: the first model to write owns the draft, so two models asked at
-    once can't mix their drafts, and nothing shows once the answer is in."""
+    """Thread-safe: passes on streamed text only from the first model to write, and nothing after close()."""
 
     def __init__(self, on_text: Callable[[str], None]) -> None:
         self.on_text = on_text
@@ -690,20 +674,19 @@ class Router:
         return list({m.name: m for m in self.models}.values())
 
     def choose(self, name: str) -> None:
-        """Ask this model first for every step from now on ("" = automatic). Others still take over when
-        it's out of quota or failing."""
+        """Ask this model first from now on ("" = automatic) and save the pick; others take over when it fails."""
         self.chosen = name if any(m.name == name for m in self.models) else ""
         write_atomically(CHOSEN_MODEL_PATH, json.dumps({"model": self.chosen}))
 
     def load_cooldowns(self) -> None:
-        """Restarts shouldn't forget which models are out of quota; retrying them costs seconds."""
+        """Restore saved cooldowns, capped at DAILY_RECHECK_S from now."""
         saved = read_json(COOLDOWNS_PATH, {})
-        latest = time.time() + DAILY_RECHECK_S  # older versions paused until midnight Pacific
+        latest = time.time() + DAILY_RECHECK_S
         for model in self.models:
             entry = saved.get(model.label, 0.0)
             if isinstance(entry, dict):
                 until, model.out_of_quota = entry.get("until", 0.0), bool(entry.get("full"))
-            else:  # older versions saved only the time
+            else:  # legacy format: just the time
                 until = entry
             model.cooldown_until = max(model.cooldown_until, min(until, latest))
 
@@ -721,12 +704,11 @@ class Router:
         prefer: str = "",
         vision: bool = False,
     ) -> tuple[dict[str, Any], Model]:
-        """Ask the best available model. fast_first tries the quickest models first (a task's first step:
-        plain chat ends there); later steps go to the smartest. A model with no answer after HEDGE_S gets
-        company: the next model is asked too and the first answer wins. on_text receives a text answer as
-        it's written. prefer names a model to try (on any key) before the rest; without it, the owner's
-        /model pick goes first, for the first step too. vision asks only models that see images, for
-        requests where the image is the point (models that don't get the images dropped)."""
+        """Ask the best available model; returns (message, model) or raises NoModelAvailable.
+
+        After HEDGE_S with no answer the next model is asked too and the first answer wins. fast_first puts
+        the quick models first; prefer names a model to try first (otherwise the owner's /model pick); vision
+        asks only models that see images; on_text receives a text answer as it streams."""
         chosen = "" if prefer else self.chosen
         first = prefer or chosen
         models = [m for m in self.models if m.vision] if vision else self.models
@@ -738,10 +720,8 @@ class Router:
         failed = skipped = waited = False
 
         def start() -> bool:
-            """Ask the next model that isn't cooling down or already asked. Not the same model as one still
-            thinking (on another key it's likely just as slow), and models set aside as slow come last unless
-            asked for by name. A backup goes to another provider first: slowness and 503s hit a provider's
-            models together."""
+            """Ask the next ready model; False if none. Skips models already thinking on another key, prefers
+            another provider (slowness and 503s hit a whole provider), and asks slow models last unless named."""
             nonlocal skipped
             now = time.time()
             busy = {model.name for model, _ in running.values()}
@@ -776,11 +756,11 @@ class Router:
                         log.info(f"no answer from {labels[0]} in {HEDGE_S}s; also asking {labels[-1]}")
                     continue
                 _, asked = running.pop(model.label)
-                if message is None:  # attempt() has put it on a cooldown; ask the next one right away
+                if message is None:  # attempt() already put it on a cooldown
                     failed = True
                     start()
                     continue
-                for slower, since in running.values():  # asked earlier and still thinking: send the next steps elsewhere
+                for slower, since in running.values():  # asked earlier and still thinking
                     if since < asked:
                         self.set_aside(slower, f"lost to {model.label}")
                         failed = True
@@ -798,8 +778,7 @@ class Router:
     def attempt(
         self, model: Model, messages: list[dict[str, Any]], gate: TextGate | None, outcomes: queue.Queue, tools: bool
     ) -> None:
-        """One model's try, on its own thread: puts (model, answer), or (model, None) once a failing model
-        is on a cooldown."""
+        """Runs on its own thread; puts (model, answer) on outcomes, or (model, None) after a cooldown is set."""
         message = None
         try:
             try:
@@ -808,7 +787,7 @@ class Router:
                 if error.status != 400 or not model.effort:
                     raise
                 log.warning(f"{model.label} rejected reasoning_effort={model.effort}; sending without it")
-                model.effort = None  # this model doesn't take the thinking setting
+                model.effort = None
                 message = self.call(model, messages, gate.writer(model) if gate else None, tools)
         except ProviderError as error:
             self.penalize(model, error.status, error.detail, retry_after(error.headers, error.detail))
@@ -825,7 +804,7 @@ class Router:
             outcomes.put((model, message))
 
     def set_aside(self, model: Model, why: str) -> None:
-        """Ask a slow model only after the others for a while: 5 minutes, doubling while it stays slow."""
+        """Ask a slow model after the others for SLOW_COOLDOWN_S, doubling while it stays slow."""
         model.slow_strikes += 1
         wait = min(SLOW_COOLDOWN_S * 2 ** (model.slow_strikes - 1), MAX_SLOW_WAIT_S)
         model.slow_until = time.time() + wait
@@ -835,7 +814,7 @@ class Router:
     def succeeded(
         self, model: Model, message: dict[str, Any], failed: bool, skipped: bool, fast_first: bool
     ) -> tuple[dict[str, Any], Model]:
-        """Keep track of why a fallback model is answering, for the progress message."""
+        """Clear the model's strikes and update the fallback note shown in progress messages."""
         model.strikes = 0
         model.out_of_quota = False
         self.trouble.pop(model.label, None)
@@ -905,7 +884,7 @@ class Router:
                 wait = hint + 2 if hint else min(60 * 2 ** (model.strikes - 1), 3600)
                 self.last_failure = f"{model.short} hit its rate limit"
         elif code == 0 or code >= 500:
-            # Busy spells last minutes, so retrying every minute just bounces back and forth.
+            # Busy spells last minutes, so back off exponentially.
             wait = min(60 * 2 ** (model.strikes - 1), MAX_TROUBLE_WAIT_S)
             if code == 0:
                 self.last_failure = f"can't reach {provider}"
@@ -926,8 +905,7 @@ class Router:
 
 
 def with_thought_signature(call: dict[str, Any]) -> dict[str, Any]:
-    """Gemini rejects tool calls without its "thought signature", which calls made by another model
-    (e.g. Groq earlier in the task) don't have. Google documents this placeholder for such history."""
+    """Gemini rejects tool calls without a thought signature (other models' calls lack one); adds Google's placeholder."""
     if call.get("extra_content", {}).get("google", {}).get("thought_signature"):
         return call
     return {**call, "extra_content": {"google": {"thought_signature": "skip_thought_signature_validator"}}}
@@ -954,8 +932,7 @@ def prepare(model: Model, messages: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def compact_screen(listing: str) -> str:
-    """An old element list as just its text: keeps facts the AI read ("Model name SM-M346B") while
-    dropping numbers, ids and flags that are stale anyway. Roughly a third of the size."""
+    """An old element list reduced to its unique labels; numbers, ids and flags are stale anyway."""
     labels = [ELEMENT_LINE.sub(r"\1", line).strip() for line in listing.splitlines()[1:]]
     seen: set[str] = set()
     unique = [label for label in labels if label and label != "(no label)" and not (label in seen or seen.add(label))]
@@ -972,8 +949,7 @@ def drop_old_screen_lists(messages: list[dict[str, Any]], before: int) -> None:
 
 
 def action_key(call: dict[str, Any]) -> str:
-    """What a call does, for spotting repeats: argument order doesn't matter, and taps a few units apart
-    on the 0-1000 scale hit the same spot."""
+    """Key for spotting repeated calls: ignores argument order and treats nearby taps as the same spot."""
     name = call["function"]["name"]
     try:
         args = json.loads(call["function"].get("arguments") or "{}")
@@ -987,15 +963,12 @@ def action_key(call: dict[str, Any]) -> str:
 
 
 def is_refusal(message: dict[str, Any]) -> bool:
-    """A plain-text reply that declines the request."""
     return not message.get("tool_calls") and bool(REFUSAL.search(message.get("content") or ""))
 
 
 def shortcut_step(call: dict[str, Any], result: str) -> tuple[str, dict[str, Any] | None] | None:
-    """One worked step for a shortcut: a description for the AI, and the tool call to replay it (None if
-    it can't be replayed safely). Taps are kept by visible text, since element numbers change; a tap by
-    coordinates stays in the description but makes the route unreplayable. Failed, read-only and sensitive
-    steps are left out."""
+    """(description, call to replay or None) for a shortcut step, or None for failed, read-only or sensitive
+    steps. Taps replay by visible text, since element numbers change; taps by coordinates can't replay."""
     name = call["function"]["name"]
     if name in SHORTCUT_SKIP or result.startswith(FAILED_RESULTS):
         return None
@@ -1006,15 +979,14 @@ def shortcut_step(call: dict[str, Any], result: str) -> tuple[str, dict[str, Any
         args = json.loads(call["function"].get("arguments") or "{}")
     except json.JSONDecodeError:
         return None
-    # A file path from one run means nothing in the next: point at the new file instead.
+    # A file path from one run means nothing in the next; a replay uses the newest file instead.
     args = {key: PREVIOUS_FILE if key == "path" else value for key, value in args.items() if value not in (None, "")}
     detail = " ".join(f"{key}={value}" for key, value in args.items())
     return f"{name} {detail}".strip(), None if name == "tap" else {"name": name, "args": args}
 
 
 def drop_old_images(messages: list[dict[str, Any]]) -> None:
-    """Keep only the newest screenshot in context; older ones just cost tokens. The owner's photo stays: the
-    task is about it (it's shrunk on arrival, so keeping it is cheap)."""
+    """Replace every image message with a placeholder, except the owner's photo."""
     for message in messages:
         content = message.get("content")
         if isinstance(content, list) and content[0].get("text") != OWNER_PHOTO:
@@ -1154,8 +1126,7 @@ class Agent:
                 self.device_lock.release()
 
     def check_done(self, request: str, reply: str, done_steps: list[tuple[str, dict[str, Any] | None]]) -> str | None:
-        """What's missing if the screen and actions clearly contradict the reply, else None. A second look by a
-        quick model (~1 s), since models sometimes report a step as done that they never did."""
+        """Have a quick model check the reply against the actions and screen; returns what's missing, or None."""
         if not self.claim_device():
             return None
         screen, image = self.device.look()  # an image only when the list can't describe the screen (games...)
@@ -1217,9 +1188,8 @@ class Agent:
                 return "Stopped."
             self.on_step()
             try:
-                # The quick first-step models can't see images. Once a screenshot or the owner's photo is in
-                # the conversation, only models that see images are asked: a text-only backup once won the race
-                # on a game screen and pressed Back blind.
+                # The quick first-step models can't see images; once any image is in the conversation, only models
+                # that see images are asked.
                 fast = step == 0 and not images
                 pictured = any(isinstance(m.get("content"), list) for m in messages)
                 message, model = self.router.complete(messages, fast_first=fast, on_text=self.on_text, vision=pictured)
@@ -1237,7 +1207,7 @@ class Agent:
                 if not used and not done_steps and not nudged and CLAIMED.search(reply):
                     nudged = True
                     log.info(f"{model.label} claimed an action without using a tool; asking again")
-                    messages.pop()  # left in, the false claim was simply repeated
+                    messages.pop()  # left in, the model repeats the false claim
                     messages.append({"role": "user", "content": NOTHING_DONE})
                     continue
                 moved = any(name in SHOWS_SCREEN_AFTER for name in used)
@@ -1307,9 +1277,8 @@ class Agent:
         return "Stopped: too many steps without finishing. Try breaking the task into smaller ones."
 
     def replay(self, shortcut: dict[str, Any], messages: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any] | None]]:
-        """Run a saved route for this exact request without asking the AI at each step (~1.3 s saved per
-        step), stopping at the first step that fails. The steps go into the conversation as if the AI had
-        made them, so the AI then checks the result on the current screen and finishes or carries on."""
+        """Run a saved route without asking the AI, stopping at the first failed step; returns the steps done.
+        Appends the calls, results and current screen to messages as if the AI had made them."""
         log.info(f"replaying shortcut #{shortcut['id']} ({len(shortcut['calls'])} steps)")
         calls, results, done = [], [], []
         last_file = None
@@ -1350,8 +1319,8 @@ class Agent:
         return done
 
     def execute(self, call: dict[str, Any], model: Model, show_screen: bool = True) -> tuple[str, str | None]:
-        """Run one tool call. After a screen-changing one, show_screen adds the new screen to the result (one
-        read per batch of calls is enough: only the last screen matters)."""
+        """Run one tool call; returns (result, screenshot or None). show_screen appends the new screen after
+        a screen-changing tool."""
         name = call["function"]["name"]
         try:
             args = json.loads(call["function"].get("arguments") or "{}")
@@ -1379,7 +1348,7 @@ class Agent:
         result = str(result)[-MAX_TOOL_OUTPUT:]
         if result.startswith(FAILED_RESULTS):
             log.info(f"{name} failed: {result[:120]}")
-        if show_screen and name in SHOWS_SCREEN_AFTER:  # saves the AI a separate look round trip (~1-3 s each)
+        if show_screen and name in SHOWS_SCREEN_AFTER:
             screen, image = self.device.look()
             note = SCREEN_NOTES.get(self.device.screen_note, "") if name == "tap" else ""
             if note:

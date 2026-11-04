@@ -1,5 +1,4 @@
-"""Voice notes to text with Groq's Whisper (free tier: 20 a minute, 2,000 a day, 8 hours of audio a day),
-and text to voice messages with Gemini's text-to-speech (free tier)."""
+"""Voice notes to text with Groq's Whisper, and text to voice messages with Gemini's text-to-speech."""
 import base64
 import json
 import re
@@ -10,19 +9,16 @@ from net import ConnectionPool, multipart
 
 HOST = "api.groq.com"
 PATH = "/openai/v1/audio/transcriptions"
-# Same speed as the turbo model here (~0.3 s) and same limits, but it heard "सात बजे" as "7 बजे" where turbo
-# heard "साथ बजे" ("with o'clock").
 MODEL = "whisper-large-v3"
 TIMEOUT_S = 60
 
 GEMINI_HOST = "generativelanguage.googleapis.com"
-# Both free and 100+ languages (Hindi included). For a 7 s sentence Flash Lite took 2-3 s here, Flash ~4 s.
+# Fastest first; both are on the free tier and speak Hindi.
 VOICE_MODELS = ("gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts")
 VOICE = "Kore"
 SAMPLE_RATE = 24000  # streamed audio is raw 16-bit mono PCM at this rate
 MAX_SPOKEN_CHARS = 3000  # ~3-4 minutes of speech
-# Markdown the AI may leave in what it wants said: emphasis and code marks go, a link keeps its text. Plain
-# [brackets] stay, since Gemini's speech models read them as vocal cues ("[laughs]").
+# Strips markdown but keeps link text and plain [brackets]: Gemini's speech models read those as vocal cues.
 MARKDOWN = re.compile(r"\[([^\]]*)\]\([^)]*\)|[*_`#~]+")
 
 
@@ -46,16 +42,14 @@ class Transcriber:
 
 
 class Voice:
-    """Speech in Telegram's voice message format (Ogg Opus). The audio is streamed into ffmpeg as it's
-    generated, which hides ffmpeg's ~1 s start and its encoding behind the wait for the model."""
+    """Speech in Telegram's voice message format (Ogg Opus), encoded by ffmpeg while it streams in."""
 
     def __init__(self, keys: list[str], pool: ConnectionPool | None = None) -> None:
         self.keys = keys
         self.pool = pool or ConnectionPool(GEMINI_HOST)  # share the chat models' warm connection when given
 
     def __call__(self, text: str, style: str, out: Path) -> float:
-        """Write `text` spoken to `out` (.opus) and return its length in seconds. Tries the next key or
-        model when one is out of quota or failing."""
+        """Write `text` spoken to `out` (.opus) and return its length in seconds, trying each model and key in turn."""
         errors = []
         text = MARKDOWN.sub(lambda match: match[1] or "", text)[:MAX_SPOKEN_CHARS]
         for model in VOICE_MODELS:

@@ -1,14 +1,7 @@
 """Hill Climb Racing autopilot: drives the car from the live screen and taps through the menus between runs.
 
-Runs on the phone through scrcpy (see scrcpy.py): ~30 frames a second in, touches out within a few ms.
-The car is found by its red body; its tilt (the body's long axis) decides the pedals. In the air, gas
-turns the nose up and brake turns it down, so the same rule also lands jumps.
-
-Menus are only tapped when the screen matches a saved picture of that exact button (hillclimb_ui/),
-and only while the game is the app in front. Anything else (offers, ads, store pages) counts as unknown
-and is never tapped: a looser colour check once took a "Starter pack" offer for the menu and opened
-Google Play's payment page. Positions were measured on the Galaxy M34 (2340x1080, landscape) with a
-640x294 video, which the saved pictures need.
+Menus are tapped only on an exact match with a saved button picture (hillclimb_ui/, 640x294 video),
+never on unknown screens such as offers or ads.
 """
 import logging
 import threading
@@ -42,7 +35,7 @@ TEMPLATES = {
     "brake_label": (48, 255),
 }
 TEMPLATE_SHIFT = 2  # pixels; the video scaler can place an edge a pixel or so off
-TEMPLATE_MATCH = 15  # mean grey difference; the same screen scores 0-10, any other 27 or more
+TEMPLATE_MATCH = 15  # largest mean grey difference that still counts as a match
 GAS_FINGER, BRAKE_FINGER, TAP_FINGER = 1, 2, 3
 # Points as fractions of the frame (x, y).
 GAS = (0.887, 0.816)
@@ -59,8 +52,8 @@ MIN_CAR_PIXELS = 80
 MAX_GAP = 3  # pixels; the body has thin dark outlines that shouldn't split it
 MAX_TURN_PER_FRAME = 35  # degrees; a bigger jump is a misread, not the car
 MERGED_GROWTH = 1.2  # this many times the car's usual pixel count means something red touches it
-MAX_REJECTED = 6  # misreads in a row; past this the new reading is the car (it really turned, or the old one was wrong)
-LOOKAHEAD_S = 0.25  # react to where the tilt is heading (covers screen-to-touch latency)
+MAX_REJECTED = 6  # misreads in a row before the new reading is accepted as the car
+LOOKAHEAD_S = 0.25  # covers screen-to-touch latency
 COAST_ABOVE = 30  # nose-up degrees: let go of the gas
 BRAKE_ABOVE = 50  # nose-up degrees: brake to turn the nose back down
 MENU_CHECK_S = 0.5
@@ -165,7 +158,7 @@ def biggest_run(counts: np.ndarray) -> slice:
 
 
 def largest_blob(mask: np.ndarray) -> np.ndarray:
-    """Keep only the biggest group of pixels: a fuel can near the car is a separate, smaller group."""
+    """Only the biggest group of pixels, so a fuel can near the car is dropped."""
     columns = biggest_run(mask.sum(axis=0))
     kept = np.zeros_like(mask)
     kept[:, columns] = mask[:, columns]
@@ -203,8 +196,7 @@ class Pilot:
         _, vectors = np.linalg.eigh(np.cov(np.stack([xs - x, ys - y])))
         vx, vy = vectors[:, 1]
         axis = float(np.degrees(np.arctan2(-vy, vx)))
-        # The long axis has no front or back: pick the reading closest to the last one, so a car
-        # past vertical reads as 100 degrees, not -80.
+        # The long axis has no front or back: take the reading closest to the last one.
         angle = min((axis, axis + 180, axis - 180), key=lambda a: abs(a - self.angle))
         return float(x), float(y), angle, len(xs)
 
@@ -215,8 +207,7 @@ class Pilot:
             self.position = None  # search the whole area again next frame
             return True, False
         x, y, angle, pixels = found
-        # A fuel can touching the car merges with it for a few frames (same red); its extra pixels
-        # give it away, since the car's own size only changes slowly as the camera zooms.
+        # A fuel can touching the car merges with it; the car's own size changes only slowly.
         merged = self.pixels and pixels > self.pixels * MERGED_GROWTH
         misread = self.history and (merged or abs(angle - self.angle) > MAX_TURN_PER_FRAME)
         if misread and self.rejected < MAX_REJECTED:
@@ -318,7 +309,7 @@ class Autopilot:
                 unknown_since = None
                 if not game_in_front():
                     return self.summary("Hill Climb Racing is no longer the app in front, so I stopped")
-                # The check above takes a moment; only tap if the same screen is still showing.
+                # The check above is slow; only tap if the same screen is still showing.
                 fresh = self.screen.wait_frame(after=self.screen.frame_count, timeout=MENU_CHECK_S)
                 if fresh is not None and not self.portrait() and view_of(fresh) == view:
                     self.tap(spot)

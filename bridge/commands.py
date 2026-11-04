@@ -60,9 +60,8 @@ def _cells(line: str) -> list[str]:
 
 
 def format_telegram(md: str) -> str:
-    """Render the AI's Markdown as Telegram HTML: bold, italic, code, links, bullets, and tables and
-    code blocks as monospace. Telegram has no headers or tables, so headers become bold and tables
-    aligned <pre> blocks."""
+    """Render the AI's Markdown as Telegram HTML. Telegram has no headers or tables: headers become bold,
+    tables and code blocks become <pre> blocks."""
     lines = md.split("\n")
     out: list[str] = []
     i = 0

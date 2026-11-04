@@ -13,9 +13,8 @@ _dns_lock = threading.Lock()
 
 
 def cached_ipv4_first(*args: Any, **kwargs: Any) -> list[Any]:
-    """getaddrinfo with a 5-minute cache, IPv4 first.
-    Cache: a lost DNS packet on a hotspot costs a resolver timeout (seconds), so look names up rarely.
-    IPv4 first: mobile hotspots sometimes black-hole IPv6, stalling new connections ~35s."""
+    """getaddrinfo with a DNS_CACHE_S cache, IPv4 first.
+    Hotspots lose DNS packets (each costs a resolver timeout) and some black-hole IPv6."""
     key = (*args, *sorted(kwargs.items()))
     now = time.time()
     with _dns_lock:
@@ -43,8 +42,7 @@ def multipart(fields: dict[str, str], file_field: str, filename: str, data: byte
 
 
 class ConnectionPool:
-    """Open HTTPS connections to one host, shared by all threads. A warm connection answers in
-    ~0.2-1s; a new one costs DNS + TCP + TLS, 1-6s on a mobile hotspot."""
+    """Open HTTPS connections to one host, shared by all threads."""
 
     def __init__(self, host: str) -> None:
         self.host = host
@@ -62,8 +60,7 @@ class ConnectionPool:
         return conn
 
     def refresh(self, timeout: float = 30) -> None:
-        """Swap idle connections for one freshly opened, so the next request doesn't pay the setup cost.
-        Servers drop idle connections after a while; calling this every couple of minutes keeps one warm."""
+        """Replace idle connections with one freshly opened. Servers drop idle connections, so call this periodically."""
         with self.lock:
             stale, self.idle = self.idle, []
         for conn in stale:
@@ -72,7 +69,7 @@ class ConnectionPool:
         try:
             conn.connect()
         except OSError:
-            return  # offline right now; the next request will connect on demand
+            return  # offline: the next request connects on demand
         with self.lock:
             self.idle.append(conn)
 

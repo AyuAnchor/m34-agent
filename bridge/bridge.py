@@ -38,13 +38,13 @@ MAX_HISTORY = 20
 MAX_MESSAGE = 4000
 APPROVAL_TIMEOUT_S = 15 * 60
 PROGRESS_LINES = 8
-OFFLINE_REPORT_S = 10 * 60  # while Telegram is unreachable, log a reminder this often, not every retry
+OFFLINE_REPORT_S = 10 * 60  # while Telegram is unreachable, log a reminder this often
 OUTAGE_NOTICE_S = 10 * 60  # tell the owner once when the main models have been failing this long
 PROGRESS_EDIT_S = 2.0
-DRAFT_EVERY_S = 0.6  # how often a reply being written is redrawn; each redraw is one API call
+DRAFT_EVERY_S = 0.6  # min gap between draft redraws; each is one API call
 SCHEDULER_TICK_S = 20
 WARM_EVERY_S = 120  # keep a fresh connection to Telegram and each AI provider ready
-ADB_GRACE_S = 6 * 60  # after a reboot, adb on 5555 normally returns within ~3 minutes
+ADB_GRACE_S = 6 * 60  # how long after a start to wait for adb before telling the owner
 WIRELESS_GUARD_S = 60  # how often to check that wireless debugging is on and trusted
 BATTERY_CHECK_S = 120
 BATTERY_LOW = 15  # alert below this %
@@ -57,7 +57,7 @@ RECEIVED_DIR = STATE_DIR / "received"  # files from the owner, on their way to t
 ATTACHMENTS = ("voice", "photo", "video", "video_note", "audio", "document")  # "photo" is a list of sizes
 VIEWABLE_IMAGES = ("image/jpeg", "image/png", "image/webp")  # sent with a request, the AI sees these too
 MAX_VIEWED_BYTES = 4 * 1024 * 1024
-VIEWED_PX = 1280  # the AI's copy of the owner's photo, longest side: it's re-sent with every step of the task
+VIEWED_PX = 1280  # longest side of the AI's copy of a photo; it's re-sent with every step
 FILE_NAMES = {"photo": "photo_{:%Y%m%d_%H%M%S}.jpg", "video": "video_{:%Y%m%d_%H%M%S}.mp4",
               "video_note": "video_{:%Y%m%d_%H%M%S}.mp4", "audio": "audio_{:%Y%m%d_%H%M%S}.mp3",
               "document": "file_{:%Y%m%d_%H%M%S}"}
@@ -115,8 +115,8 @@ def viewable(data: bytes) -> str:
 
 
 def split_message(text: str, limit: int) -> list[str]:
-    """Split a message to fit Telegram's size cap, breaking at line boundaries and never inside a
-    <pre> block (which would break the HTML). Over-long single blocks are hard-split as a last resort."""
+    """Split text into chunks of at most limit, at line breaks and never inside a <pre> block.
+    A single block over the limit is hard-split."""
     if len(text) <= limit:
         return [text]
     blocks, buffer, inside = [], [], False
@@ -187,8 +187,8 @@ class Telegram:
 
 
 class Draft:
-    """A reply shown while the AI writes it (Telegram's sendMessageDraft). Its own thread sends only the
-    newest text, so the model's stream never waits on Telegram."""
+    """A reply shown while the AI writes it (sendMessageDraft). Its own thread sends only the newest text,
+    so the model's stream never waits on Telegram."""
 
     def __init__(self, tg: Telegram, chat_id: int) -> None:
         self.tg, self.chat_id = tg, chat_id
@@ -204,7 +204,7 @@ class Draft:
         self.changed.set()
 
     def close(self) -> None:
-        """Called before the real reply goes out, so a late redraw can't land after it."""
+        """Call before sending the real reply, so a late redraw can't land after it."""
         self.closed.set()
         self.changed.set()
         self.thread.join(timeout=10)
@@ -281,8 +281,7 @@ class Bridge:
         )
 
     def send_reply(self, text: str) -> None:
-        """Send an AI reply with Markdown rendered as Telegram HTML, falling back to plain text if
-        Telegram rejects the formatting."""
+        """Send an AI reply as Telegram HTML, or as plain text if Telegram rejects the formatting."""
         try:
             self.tg.send(self.owner, format_telegram(text), parse_mode="HTML")
         except Exception as error:
@@ -290,8 +289,7 @@ class Bridge:
             self.tg.send(self.owner, text)
 
     def notify(self, text: str) -> bool:
-        """Best effort, returns whether it was delivered: background loops call this, and a failed send
-        (e.g. while Wi-Fi reconnects) must not kill them."""
+        """Best-effort message to the owner; returns whether it was delivered. Never raises."""
         if not self.owner:
             return False
         try:
@@ -313,8 +311,7 @@ class Bridge:
         threading.Thread(target=send, daemon=True).start()
 
     def warm_screen_reader(self) -> None:
-        """The first screen read starts the phone-side uiautomator2 server (~2 s). Pay that at startup
-        instead of in the owner's first task."""
+        """Start the phone-side uiautomator2 server now, so the first task doesn't wait for it."""
         try:
             self.device.read_elements()
         except Exception as error:  # adb may not be back yet after a reboot; the first task will retry
@@ -385,7 +382,7 @@ class Bridge:
                     timeout=50,
                     allowed_updates=["message", "callback_query"],
                 )
-            except Exception as error:  # the phone's network drops; keep retrying, but log it sparingly
+            except Exception as error:  # the phone's network drops; retry, but log sparingly
                 now = time.time()
                 if not offline_since:
                     offline_since = last_report = now
@@ -474,8 +471,8 @@ class Bridge:
         self.tasks.put((text, sent_at, images or []))
 
     def receive(self, message: dict[str, Any], kind: str, caption: str) -> None:
-        """A voice note becomes a task; any other file goes to the phone's Download/Telegram folder, and its
-        caption (if any) becomes a task about it. Runs on its own thread: downloads can take a while."""
+        """A voice note becomes a task; any other file goes to the phone, and its caption (if any) becomes
+        a task about it. Slow: run on its own thread."""
         sent_at = message.get("date") or time.time()
         file = message[kind][-1] if kind == "photo" else message[kind]  # the largest photo size comes last
         try:
@@ -501,7 +498,7 @@ class Bridge:
             data = self.tg.download(file["file_id"])
             name = file.get("file_name") or FILE_NAMES[kind].format(datetime.fromtimestamp(sent_at, self.schedules.tz))
             name = re.sub(r"[^\w.\- ]+", "_", Path(name).name).strip() or "file"
-            # An album's photos arrive at once, often with the same name: each gets its own folder here.
+            # Album photos arrive together, often with the same name: one folder each.
             staging = RECEIVED_DIR / secrets.token_hex(4)
             staging.mkdir(parents=True)
             local = staging / name
@@ -567,8 +564,7 @@ class Bridge:
         threading.Thread(target=capture, daemon=True).start()
 
     def send_progress(self) -> None:
-        """Posts and edits the progress message in order on its own thread, so the agent never waits on
-        Telegram between actions."""
+        """Run progress posts and edits in order on one thread, so the agent never waits on Telegram."""
         while True:
             job = self.progress_jobs.get()
             try:
@@ -577,7 +573,7 @@ class Bridge:
                 log.debug(f"progress update skipped: {error}")
 
     def post_progress(self) -> None:
-        """The live progress message appears with the first action, so plain chat gets its reply sooner."""
+        """Queue posting the live progress message (on a task's first action; plain chat gets none)."""
         text = f"Working: {self.task[:200]}"
 
         def post() -> None:
@@ -600,8 +596,7 @@ class Bridge:
         self.report_long_outage()
 
     def report_long_outage(self) -> None:
-        """Model switches only show in the progress message, but a long outage is worth one message:
-        the fallback models are weaker, so a long task may go worse than usual."""
+        """Tell the owner once per outage when the main models have been failing for OUTAGE_NOTICE_S."""
         router = self.agent.router
         since = router.outage_since()
         if since is None or since == self.outage_noticed or time.time() - since < OUTAGE_NOTICE_S:
@@ -655,7 +650,7 @@ class Bridge:
                 log.exception("could not send the update reply")
             if result.restart:
                 log.info("exiting to restart into the updated code")
-                os._exit(0)  # runit starts the service again, now running the new code
+                os._exit(0)  # runit restarts the service
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -821,8 +816,8 @@ class Bridge:
         return f"<b>AI usage</b>\n<pre>{html.escape(table)}</pre>\n" + "\n".join(notes)
 
     def monitor_battery(self) -> None:
-        """Message the owner once when the battery drops below BATTERY_LOW, and when it has recovered. Whether
-        the alert went out is kept on disk, so a restart (an update, a reboot) doesn't send it again."""
+        """Alert the owner once below BATTERY_LOW and once on recovery. The alerted flag is kept on disk
+        so a restart doesn't repeat it."""
         alerted = BATTERY_ALERTED_PATH.exists()
         while True:
             time.sleep(BATTERY_CHECK_S)
@@ -834,7 +829,7 @@ class Bridge:
             if status is None or self.owner is None:
                 continue
             level, charging = status
-            # Only marked as sent once delivered, so an alert that hit a network drop is retried next check.
+            # Marked sent only once delivered, so an undelivered alert is retried.
             if level < BATTERY_LOW and not alerted:
                 state = "charging" if charging else "not charging; is the charger unplugged or the power off?"
                 alerted = self.notify(f"Battery low: {level}% ({state}). I'll stop working when it runs out.")
@@ -862,8 +857,8 @@ class Bridge:
             )
 
     def guard_wireless_debugging(self) -> None:
-        """Keep Wi-Fi on, and wireless debugging on and trusted on whatever Wi-Fi the phone is on, so a
-        reboot there can recover by itself (Android asks per network, and nobody can answer at boot)."""
+        """Keep Wi-Fi on, and wireless debugging on and trusted on the current network, so a reboot can
+        recover unattended (Android asks per network)."""
         while True:
             time.sleep(WIRELESS_GUARD_S)
             try:  # needs no screen, so it doesn't wait for the device lock
@@ -873,7 +868,7 @@ class Bridge:
             except Exception:
                 log.exception("Wi-Fi guard failed")
             if not self.device_lock.acquire(blocking=False):
-                continue  # a task or command is using the screen; try again next round
+                continue
             try:
                 if note := self.device.ensure_wireless_debugging():
                     log.info(note)
@@ -897,7 +892,7 @@ class Bridge:
 
 
 def log_thread_error(args: threading.ExceptHookArgs) -> None:
-    """An uncaught error in a background thread otherwise goes to stderr, which runit discards."""
+    """Log uncaught background-thread errors; runit discards stderr."""
     name = args.thread.name if args.thread else "?"
     log.error(f"thread {name} crashed", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
 

@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageStat
 
-try:  # persistent UI automation server: ~0.3s per screen read instead of ~3s for `uiautomator dump`
+try:  # optional persistent UI automation server, much faster than `uiautomator dump`
     import uiautomator2
 except ImportError:
     uiautomator2 = None
@@ -24,14 +24,13 @@ except ImportError:
 log = logging.getLogger("device")
 
 ADB_TARGET = "127.0.0.1:5555"  # same device the `phone` wrapper talks to
-# adb's own connection errors only, so a command's own failure output never causes a repeat run.
+# adb's own connection errors only: a command's own failure output must not trigger a retry.
 ADB_DISCONNECTED = re.compile(
     r"^(?:adb: )?(?:error: )?(?:device\b.*\b(?:not found|offline)|no devices|closed)", re.MULTILINE
 )
-# With Android animations off (see README), a short pause lets the tap register before the stability check.
+# Lets an action register before the screen is read; assumes Android animations are off (see README).
 ACTION_PAUSE_S = 0.3
-# Extra wait before a tap by x/y that follows another action in the same reply, for what the first one opened
-# to slide in. Taps by text wait for their text instead, and taps by number re-find their element.
+# Extra wait before an x/y tap that follows another action, for whatever that opened to finish sliding in.
 FOLLOW_UP_PAUSE_S = 0.3
 SCREEN_PATH = Path("/tmp/agent-screen.jpg")
 MEDIA_DIR = Path("/tmp/agent-media")
@@ -41,8 +40,8 @@ GENERATED_DIR = "/sdcard/Pictures/AI"
 SCREENSHOT_DIR = "/sdcard/DCIM/Screenshots"
 MAX_ELEMENTS = 80
 MIN_LABELED = 3  # fewer labeled elements than this and the AI gets a screenshot with the list
-# The AI's copy of a screenshot is shrunk to this share of the width and height: a quarter of the pixels, so
-# fewer image tokens. (uiautomator2's takeScreenshot ignores its scale argument: it always sends full size.)
+# Share of width and height the AI's screenshot copy is shrunk to, for fewer image tokens.
+# uiautomator2's takeScreenshot ignores its scale argument, so the resize happens here.
 AI_IMAGE_SCALE = 0.5
 THUMB_SIZE = (32, 32)
 SAME_PICTURE_DIFF = 3  # mean grey difference (0-255) between thumbnails below which two screens match
@@ -51,8 +50,8 @@ STABLE_TIMEOUT_S = 2.5
 TEXT_WAIT_S = 1.5  # a tap by text waits this long for its text to show up
 EDIT_TEXT = "android.widget.EditText"  # also what Chrome reports for a web page's text inputs
 WEB_VIEW = ("android.webkit.WebView", "Web View")  # class, and the description of Chrome's page area
-PAGE_WAIT_S = 5  # uncached pages showed up after ~1.5-2 s
-APP_WAIT_S = 4  # YouTube's screen was readable 1.8 s after opening warm, 2.2 s cold
+PAGE_WAIT_S = 5  # longest wait for an opened link's page to show
+APP_WAIT_S = 4  # longest wait for an opened app's screen to show
 VIEW = "android.intent.action.VIEW"
 BROWSABLE = "android.intent.category.BROWSABLE"
 BROWSER = "com.android.chrome"
@@ -66,9 +65,9 @@ APP_CARDS = {
 MAX_VIDEO_S = 30
 MAX_AUDIO_S = 120
 SAVE_WAIT_S = 12
-CAMERA_READY_S = 6  # the camera app usually shows its controls within ~1 s
-# On opening, the camera briefly shows the back lens's controls before restoring the last-used lens
-# (~0.4 s), so the lens is only trusted once its label has held this long.
+CAMERA_READY_S = 6  # longest wait for the camera app's controls
+# On opening, the camera briefly shows the back lens's controls before restoring the last-used lens,
+# so a lens label is only trusted once it has held this long.
 CAMERA_SETTLE_S = 0.6
 FILE_POLL_S = 0.3
 # Termux:API commands; Termux's files are visible inside Debian at the same paths.
@@ -116,7 +115,6 @@ MOTION_SHARE = 0.02  # motion if more than 2% of the picture changed since the p
 MOTION_SKIP_S = 1.0  # ignore the first second while the camera settles its exposure
 PHONE_NUMBER = re.compile(r"\+?[\d\s()-]{3,20}")
 LAUNCHER = "android.intent.category.LAUNCHER"
-# Apps whose package name doesn't contain their everyday name.
 SETTINGS_PAGES = {
     "main": "android.settings.SETTINGS",
     "wifi": "android.settings.WIFI_SETTINGS",
@@ -143,6 +141,7 @@ SETTINGS_PAGES = {
 }
 # NEW_TASK | CLEAR_TOP: otherwise Settings ignores a new page while another Settings page is showing.
 SETTINGS_FLAGS = " -f 0x14000000"
+# Apps whose package name doesn't contain their everyday name.
 APP_ALIASES = {
     "playstore": "com.android.vending",
     "files": "com.sec.android.app.myfiles",
@@ -173,8 +172,7 @@ MARK_COLOR = (255, 0, 180)
 
 
 def adb(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[bytes]:
-    """Run adb against this phone. Calls adb directly (~100 ms) and only reconnects when a command fails,
-    instead of checking the connection before every command (~90 ms extra each)."""
+    """Run adb against this phone, reconnecting and retrying once if the connection had dropped."""
     command = ["adb", "-s", ADB_TARGET, *args]
     result = subprocess.run(command, capture_output=True, timeout=timeout)
     if result.returncode != 0 and ADB_DISCONNECTED.search(result.stderr.decode(errors="replace")):
@@ -189,7 +187,7 @@ def shell(command: str, timeout: int = 60) -> str:
 
 
 def getprop(name: str) -> str:
-    """Read a system property directly. Works right after boot, before adb is back on port 5555."""
+    """Read a system property without adb, so it works right after boot."""
     result = subprocess.run(["/system/bin/getprop", name], capture_output=True, text=True, timeout=10)
     return result.stdout.strip()
 
@@ -225,8 +223,7 @@ def phone_line_problem() -> str | None:
 
 def compress_video(source: Path, start: float = 0, duration: float | None = None, width: int = 960,
                    crf: int = 28, audio: bool = True) -> Path:
-    """A smaller copy for sending: uploads from the phone can be slow, and bots can't send over 50 MB.
-    Takes ~0.5 s per second of video on the phone."""
+    """A smaller copy for sending (bots can't send files over 50 MB)."""
     target = source.with_name(f"{source.stem}_small.mp4")
     trim = ["-ss", f"{start:.1f}", *(["-t", f"{duration:.1f}"] if duration else [])]
     sound = ["-c:a", "aac", "-b:a", "64k"] if audio else ["-an"]
@@ -267,7 +264,7 @@ def motion_moments(video: Path) -> list[float]:
 
 
 def start_recorder(path: Path, seconds: int, options: list[str]) -> None:
-    """Start a Termux:API microphone recording that stops itself after the given seconds. Takes ~4 s."""
+    """Start a Termux:API microphone recording that stops itself after the given seconds."""
     AUDIO_DIR.mkdir(exist_ok=True)
     started = subprocess.run([MIC_RECORDER, "-f", str(path), "-l", str(seconds), *options],
                              capture_output=True, text=True, timeout=30)
@@ -280,8 +277,7 @@ def stop_recorder() -> None:
 
 
 def wait_for_m4a(path: Path) -> Path:
-    """An .m4a is complete once its index ("moov") is written at the end. Waiting for that is quicker
-    than the ~4 s stop call, as the recorder stops itself at its limit."""
+    """Wait until the .m4a is complete, which is once its index ("moov") is written at the end."""
     for _ in range(20):
         if path.exists() and b"moov" in path.read_bytes():
             return path
@@ -334,7 +330,7 @@ EDGE_PANEL_HANDLE = {"trigger_container", "trigger_view"}
 
 def is_chrome(package: str, resource: str, bounds: list[int]) -> bool:
     """Status bar icons, navigation buttons and the edge panel handle: on every screen, never the target.
-    The pulled-down notification shade is also system UI but sits lower, so it stays."""
+    The notification shade is also system UI but sits lower, so it stays."""
     if package == "com.android.systemui":
         return bounds[3] <= STATUS_BAR_BOTTOM or resource in NAVIGATION_BUTTONS
     return package == "com.sec.android.app.launcher" and resource in EDGE_PANEL_HANDLE
@@ -366,8 +362,8 @@ class Device:
         self.changed = False  # something was done since the last look, so the numbered elements may have moved
         self.empty_web_page = False
         self.packages: set[str] = set()  # apps with windows in the last screen read
-        # The last two looks (elements, thumbnail or None), to tell the AI when a tap changed nothing ("same")
-        # or the screen went back to how it was a look earlier ("back"). Cleared at the start of each task.
+        # The last two looks (elements, thumbnail or None), to tell the AI a tap changed nothing ("same")
+        # or returned to the screen before ("back"). Cleared at the start of each task.
         self.looks: list[tuple[list[Element], Image.Image | None]] = []
         self.screen_note = ""
         self.receive_lock = threading.Lock()
@@ -381,8 +377,7 @@ class Device:
         self.portrait = (min(self.width, self.height), max(self.width, self.height))
 
     def specs(self) -> str:
-        """This phone's fixed facts (model, OS, chipset, total RAM and storage), read once and cached.
-        Putting them in the prompt stops the AI inventing wrong specs for its own phone."""
+        """This phone's fixed facts (model, OS, chipset, total RAM and storage), read once and cached."""
         if not self._specs:
             out = shell(
                 "getprop ro.product.model; getprop ro.build.version.release; getprop ro.build.version.oneui;"
@@ -426,8 +421,8 @@ class Device:
         self.packages = {package for node in root.iter("node") if (package := node.get("package"))}
         elements: list[Element] = []
         seen = set()
-        # Chrome shows an empty "Web View" while a page loads (~0.5-1.5 s) and sometimes keeps it (seen on
-        # sign-in pages): the list then holds only Chrome's toolbar, so the screenshot has to describe the page.
+        # Chrome shows an empty Web View while a page loads, and sometimes keeps it: then only a screenshot
+        # shows the page.
         self.empty_web_page = any(
             len(node) == 0
             and (node.get("class") in WEB_VIEW or node.get("content-desc") in WEB_VIEW)
@@ -453,8 +448,8 @@ class Device:
             checkable = node.get("checkable") == "true"
             state = ("checked" if node.get("checked") == "true" else "unchecked") if checkable else ""
             flags = " ".join(f for f in (state, *(f for f in ("selected", "focused") if node.get(f) == "true")) if f)
-            # A settings row is the row, its title, its summary and an unlabeled switch: keep one line for the
-            # row (title and switch state) plus the summary, which often explains why something is off.
+            # A settings row holds its title, a summary and an unlabeled switch: fold the title and switch state
+            # into the row's line, and keep the summary (it often says why something is off).
             row = next((e for e in reversed(elements[-4:]) if contains(e.box, bounds)), None)
             if row is not None:
                 if not interactive and label == row.label:
@@ -482,13 +477,13 @@ class Device:
         return image
 
     def read_stable_elements(self) -> list[Element]:
-        """Read the screen until two reads in a row match, so a page transition isn't caught halfway. A screen
-        with almost no labels (a game, the camera) goes by its screenshot, so a second read would only cost time."""
+        """Read the screen until two reads in a row match, so a transition isn't caught halfway. Screens with
+        almost no labels go by their screenshot, so they get a single read."""
         elements = self.read_elements()
         if sum(1 for e in elements if e.label) < MIN_LABELED:
             return elements
         deadline = time.time() + STABLE_TIMEOUT_S
-        while time.time() < deadline:  # a read takes ~250 ms, which is gap enough between the two
+        while time.time() < deadline:  # no sleep needed: a read itself takes long enough
             again = self.read_elements()
             if again == elements:
                 break
@@ -496,9 +491,8 @@ class Device:
         return elements
 
     def look(self, picture: bool = False) -> tuple[str, str | None]:
-        """Number the on-screen elements; return the list and a marked screenshot when asked for (picture)
-        or when the list can't describe the screen (games, camera, icon-only buttons). A screenshot about
-        doubles the AI's answer time, and most screens read fine as a list."""
+        """Number the on-screen elements; return the list, plus a marked screenshot when asked for (picture)
+        or when the list can't describe the screen."""
         self.elements = self.read_stable_elements()
         self.changed = False
         lines = [
@@ -521,7 +515,7 @@ class Device:
 
     def matches(self, seen: tuple[list["Element"], Image.Image | None], earlier: tuple[list["Element"], Image.Image | None]) -> bool:
         """Whether two looks show the same screen: same elements, and same picture when both have one. Without
-        pictures, too few elements say nothing (a game's list is empty whatever it shows)."""
+        pictures, a near-empty element list proves nothing."""
         (elements, thumb), (old_elements, old_thumb) = seen, earlier
         if elements != old_elements:
             return False
@@ -538,7 +532,7 @@ class Device:
         """Draw each element's number on the screenshot (Set-of-Mark), skipping full-screen containers."""
         marked = image.copy()
         draw = ImageDraw.Draw(marked)
-        size = round(20 / AI_IMAGE_SCALE)  # ~20 px tall numbers once shrunk for the AI
+        size = round(20 / AI_IMAGE_SCALE)  # 20 px tall numbers once shrunk for the AI
         font = ImageFont.load_default(size=size)
         screen_area = self.width * self.height
         for number, element in enumerate(self.elements, 1):
@@ -553,9 +547,8 @@ class Device:
         return marked
 
     def find_text(self, text: str) -> Element | None:
-        """The element whose label matches text exactly, else contains it as whole words (so "Stop" never
-        matches "Stopwatch"). Keeps reading for a moment while it's missing: the screen may still be changing
-        after the previous action."""
+        """The element whose label matches text exactly, else contains it as whole words ("Stop" never matches
+        "Stopwatch"). Keeps reading for up to TEXT_WAIT_S while it's missing."""
         wanted = text.strip().lower()
         whole_words = re.compile(rf"(?<!\w){re.escape(wanted)}(?!\w)")
         deadline = time.time() + TEXT_WAIT_S
@@ -572,8 +565,8 @@ class Device:
                 return None
 
     def relocate(self, target: Element) -> Element | None:
-        """Where an element from the last look is now, after other actions may have changed the screen: the
-        same label and id, closest to where it was. Unlabeled elements without an id can't be told apart."""
+        """Where an element from the last look is now: same label and id, closest to where it was, or None.
+        Unlabeled elements without an id can't be told apart, so they are returned as they were."""
         if not (target.label or target.resource):
             return target
         same = [e for e in self.read_elements() if (e.label, e.resource) == (target.label, target.resource)]
@@ -617,7 +610,6 @@ class Device:
         return f"{'Long-pressed' if hold_ms else 'Tapped'} {what}."
 
     def click(self, x: int, y: int) -> None:
-        """Through the automation server when it's up (~0.15 s quicker: `input` starts a new process each time)."""
         self.changed = True
         try:
             if automator := self.fast():
@@ -649,8 +641,8 @@ class Device:
         return None
 
     def type_text(self, text: str, submit: bool, clear: bool = False) -> str:
-        """Plain ASCII goes in through adb's `input text` (~0.2 s). Anything else (Hindi, emoji...) is pasted
-        into the focused field and checked afterwards (~1 s: each read of the field takes ~0.3-0.5 s)."""
+        """Plain ASCII goes in through adb's `input text`, which can't type anything else. Other text (Hindi,
+        emoji...) is pasted into the focused field and checked afterwards."""
         self.changed = True
         field = self.focused_field() if clear or not text.isascii() else None
         if field is None and (clear or not text.isascii()):
@@ -667,7 +659,7 @@ class Device:
             automator = self.fast()
             automator.set_clipboard(text)
             automator.jsonrpc.pasteClipboard()
-            shown = field.info.get("text") or ""  # field is a query, so this reads the field as it is now
+            shown = field.info.get("text") or ""  # field is a query, so this re-reads the live field
             if text not in shown:
                 done += f", but the field now shows {shown[:200]!r}: check it before going on"
         if submit:
@@ -696,23 +688,21 @@ class Device:
         return match[1] if match else None
 
     def ensure_wifi(self) -> str | None:
-        """With no SIM, Wi-Fi is the phone's only link to Telegram, so it must never stay off (a mistaken tap
-        on its switch would otherwise cut the bot off). Uses adb on the phone itself, which needs no network.
-        Returns a note if it acted."""
+        """Turn Wi-Fi back on if it's off: with no SIM it's the bot's only link. Works offline, as adb runs on the
+        phone itself. Returns a note if it acted."""
         if shell("cmd wifi status | head -1") != "Wifi is disabled":
             return None
         shell("cmd wifi set-wifi-enabled enabled")
         return "Wi-Fi was off, so I turned it back on (it's the phone's only connection)."
 
     def ensure_wireless_debugging(self) -> str | None:
-        """Keep Wireless debugging on, approving Android's "Allow wireless debugging on this network?"
-        prompt on a new network. Recovery after a reboot needs it, and nobody can tap that prompt then.
-        Only that exact prompt is answered, never "Allow USB debugging?". Returns a note if it acted."""
+        """Keep Wireless debugging on (recovery after a reboot needs it), approving only the exact "Allow
+        wireless debugging on this network?" prompt, never "Allow USB debugging?". Returns a note if it acted."""
         if shell("settings get global adb_wifi_enabled") == "1":
             return None
         network = self.wifi_network()
         if network is None:
-            return None  # wireless debugging needs Wi-Fi; nothing to do on mobile data or offline
+            return None  # wireless debugging needs Wi-Fi
         self.wake()
         shell("settings put global adb_wifi_enabled 1")
         time.sleep(2)
@@ -791,7 +781,7 @@ class Device:
         return None
 
     def open_settings(self, page: str, app: str = "") -> str:
-        """Jump straight to a Settings page (or one app's info page) instead of tapping through menus."""
+        """Open a Settings page directly, or one app's info page when page is "app"."""
         self.changed = True
         if page == "app":
             package = self.find_package(app) if app else None
@@ -806,16 +796,15 @@ class Device:
         return f"Opened {page.replace('_', ' ')} settings."
 
     def open_app(self, name: str, wait: bool = True) -> str:
-        """With wait, returns once the app's screen has elements: YouTube shows an empty window for ~1-2 s,
-        which a look takes as settled, and the AI then spent a step on wait (seen: 5 s)."""
+        """With wait, returns once the app's screen has elements: some apps first show an empty window,
+        which a look would take as settled."""
         self.changed = True
         package = self.find_package(name)
         if package is None:
             return f"No app with a home-screen icon matches {name!r}. Try another name."
         before = self.read_elements() if wait else []
         wait = wait and package not in self.packages  # already on screen: nothing will change
-        # am start is ~0.4 s quicker than monkey. monkey stays as the fallback for packages that aren't in the
-        # launcher list.
+        # am start is quicker than monkey; monkey covers packages missing from the launcher list.
         component = self.launchable().get(package)
         # The same intent and flags a launcher uses, so an app already open comes back where it was.
         output = shell(f"am start -a android.intent.action.MAIN -c {LAUNCHER} -f 0x10200000 -n {shlex.quote(component)}") if component else ""
@@ -834,8 +823,8 @@ class Device:
         return shell(f"ls -t {CAMERA_DIR} 2>/dev/null | head -1")
 
     def camera_switch(self, video: bool) -> Element | None:
-        """The camera app's switch-lens button, once the camera is ready to shoot in the wanted mode: the
-        controls show before a switch from photo to video mode finishes, so the shutter's label is checked too."""
+        """The camera's switch-lens button, or None until the shutter shows the wanted mode (the controls
+        appear before a switch between photo and video mode finishes)."""
         elements = self.read_elements()
         shutter = "Start recording" if video else "Take picture"
         if not any(e.label == shutter for e in elements):
@@ -843,8 +832,8 @@ class Device:
         return next((e for e in elements if SWITCH_CAMERA.search(e.label)), None)
 
     def face_camera(self, front: bool, video: bool = False) -> None:
-        """The camera app ignores facing hints in intents and remembers the last lens, so flip it via its button.
-        Waits for the camera to be ready (and, after a flip, for the other lens) instead of fixed pauses."""
+        """Flip to the wanted lens with the camera's button: the app ignores facing hints in intents and
+        remembers the last lens."""
         deadline = time.time() + CAMERA_READY_S
         button, since = self.camera_switch(video), time.time()
         while time.time() < deadline and (button is None or time.time() - since < CAMERA_SETTLE_S):
@@ -872,7 +861,7 @@ class Device:
             shell("input keyevent KEYCODE_VOLUME_DOWN")
         extensions = MEDIA_EXTENSIONS["video" if video else "photo"]
         deadline = time.time() + SAVE_WAIT_S
-        while time.time() < deadline:  # the file appears only after the camera finishes processing (~5 s)
+        while time.time() < deadline:  # the file appears only after the camera finishes processing
             time.sleep(FILE_POLL_S)
             newest = self.newest_camera_file()
             if newest and newest != before and newest.lower().endswith(extensions):
@@ -902,7 +891,7 @@ class Device:
         return f"Saved {seconds}s audio: {self.record_audio_file(seconds)}. Use send_file to send it."
 
     def battery_status(self) -> tuple[int, bool] | None:
-        """(level %, charging or full). Uses adb, or Termux:API if adb isn't available (e.g. just after a reboot)."""
+        """(level %, charging or full), or None. Falls back to Termux:API when adb is down (e.g. after a reboot)."""
         info = dict(re.findall(r"^\s+([\w ]+): (.+)$", shell("dumpsys battery"), re.MULTILINE))
         if info.get("level", "").isdigit():
             return int(info["level"]), info.get("status") in ("2", "5")
@@ -953,15 +942,14 @@ class Device:
         before = self.read_elements()
         start_activity(VIEW, f" -p {package}" if package else "", data=url)
         deadline = time.time() + PAGE_WAIT_S
-        while time.time() < deadline:  # the old screen stays up for ~0.5 s, then Chrome's empty page
+        while time.time() < deadline:  # the old screen stays up for a moment, then Chrome's empty page
             elements = self.read_elements()
             if elements and elements != before and not self.empty_web_page:
                 break
         return f"Opened {url} in {app}." if app else f"Opened {url}."
 
     def status(self) -> str:
-        """Volumes, brightness, display, connectivity and battery in one adb call (~0.7 s), so the AI doesn't dig
-        through dumpsys output over many steps."""
+        """Volumes, brightness, display, connectivity, battery, storage, RAM and chipset from one adb call."""
         output = shell(STATUS_SCRIPT)
         values = dict(re.findall(r"^(\w+)=(.*)$", output, re.MULTILINE))
         volumes = []
@@ -1029,7 +1017,7 @@ class Device:
         return f"Brightness set to {percent}%."
 
     def speak(self, text: str) -> str:
-        # Termux:API takes ~5s to start; speak in the background instead of making the caller wait.
+        # Termux:API is slow to start, so the caller doesn't wait for it.
         threading.Thread(target=termux, args=("termux-tts-speak", text), kwargs={"timeout": 120}, daemon=True).start()
         return f"Speaking: {text!r}"
 
@@ -1078,9 +1066,8 @@ class Device:
         return "\n".join(found[: max(1, min(count, 20))]) or f"No {kind} files found."
 
     def receive(self, local: Path, folder: str = RECEIVED_DIR) -> str:
-        """Put a file in a folder on the phone (a file from the owner: Download/Telegram), renamed if the name
-        is taken, and have it indexed so photos and videos show up in Gallery. One at a time: an album's photos
-        arrive together, and two could otherwise both find the same name free."""
+        """Push a file to a folder on the phone, renamed if the name is taken, and index it for Gallery; return
+        its path. One at a time, so files arriving together can't claim the same free name."""
         with self.receive_lock:
             path = f"{folder}/{local.name}"
             number = 1

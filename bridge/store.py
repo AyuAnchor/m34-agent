@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STATE_DIR = Path.home() / ".cache/tg-bridge"
-# Android still reports some old zone names that Debian only ships in its optional legacy package.
+# Old zone names Android still reports; Debian ships them only in an optional package.
 LEGACY_ZONES = {
     "Asia/Calcutta": "Asia/Kolkata",
     "Asia/Katmandu": "Asia/Kathmandu",
@@ -37,8 +37,7 @@ log = logging.getLogger("store")
 
 
 def write_atomically(path: Path, text: str) -> None:
-    """Write to a temporary file, flush it to storage, then swap it in: a crash or power loss mid-write
-    leaves the previous version intact instead of a half-written file."""
+    """Write via an fsynced temp file and rename, so a crash mid-write leaves the previous version intact."""
     temp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with open(temp, "w") as handle:
@@ -53,8 +52,7 @@ def write_atomically(path: Path, text: str) -> None:
 
 
 def read_json(path: Path, default: Any) -> Any:
-    """Load a JSON file. A damaged one is moved aside and logged rather than read as empty, which the
-    next save would otherwise make permanent."""
+    """Load a JSON file, or default if missing. A damaged file is moved aside so the next save can't overwrite it."""
     try:
         return json.loads(path.read_text())
     except FileNotFoundError:
@@ -163,13 +161,12 @@ class Shortcuts:
 
     @staticmethod
     def same_request(item: dict[str, Any], task: str) -> bool:
-        """Exactly the same keywords: only then is a saved route safe to replay without the AI, since
-        "record 10 seconds" must not replay "record 5 seconds"."""
+        """Exactly the same keywords, the only case safe to replay without the AI ("10 seconds" vs "5 seconds")."""
         return keywords(item["task"]) == keywords(task)
 
     def save(self, task: str, steps: list[str], calls: list[dict[str, Any]]) -> None:
-        """Keep one shortcut per request; a shorter route for the same request replaces the old one.
-        steps describe the route for the AI; calls are the same steps as tool calls, for replaying."""
+        """Keep one shortcut per request; a shorter route replaces the old one.
+        steps are shown to the AI; calls are the same steps as tool calls, for replaying."""
         words = keywords(task)
         if len(words) < MIN_SHORTCUT_KEYWORDS:
             return
@@ -178,7 +175,7 @@ class Shortcuts:
             items = self.store.load()
             for item in items:
                 if keywords(item["task"]) == words:
-                    if len(steps) <= len(item["steps"]) or not item.get("calls"):  # older saves can't replay
+                    if len(steps) <= len(item["steps"]) or not item.get("calls"):  # entries without calls can't replay
                         item.update(task=task, steps=steps, calls=calls, saved=saved)
                         self.store.save(items)
                     return
@@ -247,8 +244,7 @@ class Schedules:
         return repeat
 
     def add(self, task: str, run_at: datetime, repeat: str) -> dict[str, Any]:
-        """Store exactly the time that was shown for approval. If it passed while waiting, it runs at the
-        next scheduler tick."""
+        """Store the time shown for approval as is; if it passed meanwhile, it runs at the next tick."""
         repeat = self.check_repeat(repeat)
         with self.store.lock:
             items = self.store.load()
@@ -279,8 +275,7 @@ class Schedules:
         with self.store.lock:
             items, due, kept = self.store.load(), [], []
             for item in items:
-                # Back into the zone itself, not the fixed offset that was saved, so "daily 07:00" stays
-                # 07:00 across daylight-saving changes and follows the phone if its time zone changes.
+                # Convert to the zone, not the saved offset, so "daily 07:00" survives DST and zone changes.
                 run_at = datetime.fromisoformat(item["next_run"]).astimezone(self.tz)
                 if run_at > now:
                     kept.append(item)
