@@ -101,19 +101,12 @@ STATUS_SCRIPT = (
     "echo soc=$(getprop ro.soc.manufacturer) $(getprop ro.soc.model);"
     "echo chip=$(getprop ro.board.platform)"
 )
-TOGGLES = {  # setting -> (command to turn it on, command to turn it off)
-    "auto_rotate": ("settings put system accelerometer_rotation 1", "settings put system accelerometer_rotation 0"),
-    "dark_mode": ("cmd uimode night yes", "cmd uimode night no"),
-    "bluetooth": ("cmd bluetooth_manager enable", "cmd bluetooth_manager disable"),
-    "do_not_disturb": ("cmd notification set_dnd on", "cmd notification set_dnd off"),
-}
 LARGE_VIDEO_BYTES = 20 * 1024 * 1024  # compress videos above this before sending
 MOTION_FPS = 2
 MOTION_SIZE = (160, 90)
 MOTION_PIXEL_DIFF = 25  # a pixel "changed" if its brightness moves by more than this (0-255)
 MOTION_SHARE = 0.02  # motion if more than 2% of the picture changed since the previous frame
 MOTION_SKIP_S = 1.0  # ignore the first second while the camera settles its exposure
-PHONE_NUMBER = re.compile(r"\+?[\d\s()-]{3,20}")
 LAUNCHER = "android.intent.category.LAUNCHER"
 SETTINGS_PAGES = {
     "main": "android.settings.SETTINGS",
@@ -210,15 +203,6 @@ def handles(action: str, data: str | None = None) -> bool:
 def is_temporary(path: Path) -> bool:
     """Files the agent created only to send (pulled copies, audio recordings)."""
     return path.parent in (MEDIA_DIR, AUDIO_DIR)
-
-
-def phone_line_problem() -> str | None:
-    """Why calls and SMS can't work right now, if they can't."""
-    if all(state.strip() in ("ABSENT", "") for state in shell("getprop gsm.sim.state").split(",")):
-        return "There is no SIM card in the phone, so calls and SMS are not possible."
-    if shell("settings get global airplane_mode_on") == "1":
-        return "Airplane mode is on, so calls and SMS are not possible. Ask the owner to turn it off."
-    return None
 
 
 def compress_video(source: Path, start: float = 0, duration: float | None = None, width: int = 960,
@@ -992,13 +976,6 @@ class Device:
             chip_line,
         ])
 
-    def toggle(self, setting: str, on: bool) -> str:
-        commands = TOGGLES.get(setting)
-        if commands is None:
-            return f"Setting must be one of: {', '.join(TOGGLES)}."
-        shell(commands[0 if on else 1])
-        return f"{setting.replace('_', ' ').capitalize()} turned {'on' if on else 'off'}."
-
     def set_volume(self, percent: int, stream: str) -> str:
         stream_id = VOLUME_STREAMS.get(stream)
         if stream_id is None:
@@ -1020,40 +997,6 @@ class Device:
         # Termux:API is slow to start, so the caller doesn't wait for it.
         threading.Thread(target=termux, args=("termux-tts-speak", text), kwargs={"timeout": 120}, daemon=True).start()
         return f"Speaking: {text!r}"
-
-    def search_contacts(self, query: str) -> str:
-        try:
-            contacts = json.loads(termux("termux-contact-list") or "[]")
-        except json.JSONDecodeError:
-            return "Could not read contacts. Termux:API may need the contacts permission."
-        wanted = query.lower()
-        found = [c for c in contacts if wanted in c.get("name", "").lower() or wanted in c.get("number", "")]
-        return "\n".join(f"{c.get('name')}: {c.get('number')}" for c in found[:10]) or f"No contact matches {query!r}."
-
-    def make_call(self, number: str) -> str:
-        if problem := phone_line_problem():
-            return problem
-        if not PHONE_NUMBER.fullmatch(number.strip()):
-            return "That doesn't look like a phone number."
-        start_activity("android.intent.action.CALL", data=f"tel:{number.strip()}")
-        return f"Calling {number}."
-
-    def send_sms(self, number: str, text: str) -> str:
-        if problem := phone_line_problem():
-            return problem
-        if not PHONE_NUMBER.fullmatch(number.strip()):
-            return "That doesn't look like a phone number."
-        output = termux("termux-sms-send", "-n", number.strip(), text)
-        return f"SMS sent to {number}." + (f" ({output})" if output else "")
-
-    def compose_email(self, to: str, subject: str, body: str) -> str:
-        data = f"mailto:{to.strip()}"
-        if not handles("android.intent.action.SENDTO", data):
-            return "No email app can send mail on this phone."
-        extras = f" --es android.intent.extra.SUBJECT {shlex.quote(subject)} --es android.intent.extra.TEXT {shlex.quote(body)}"
-        start_activity("android.intent.action.SENDTO", extras, data)
-        time.sleep(3)
-        return "The email is written in the mail app. Call look, then tap its Send button to send it."
 
     def find_media(self, kind: str, count: int) -> str:
         extensions = MEDIA_EXTENSIONS.get(kind, MEDIA_EXTENSIONS["photo"] + MEDIA_EXTENSIONS["video"])

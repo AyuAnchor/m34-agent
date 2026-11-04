@@ -81,11 +81,9 @@ service, so the agent controls the phone like a computer would, without touching
 | `speak` | Say something out loud through the phone's speaker |
 | `send_voice` | Send you a voice message of any text (Gemini text-to-speech), for "answer in voice" |
 | `generate_image` | Make a new picture from a description (FLUX.1 on NVIDIA), send it to you and keep a copy on the phone |
-| `search_contacts` | Find contacts by name or number |
-| `make_call`, `send_sms`, `send_email` | Always ask you first; calls/SMS need a SIM and airplane mode off |
 | `find_media`, `send_file`, `send_screenshot` | Find photos/videos, send any file or the screen to you |
 | `watch_motion`, `listen`, `stop_watch` | Camera watch (any movement, or only someone entering) and sound watch (a baby crying, a dog, an alarm...) in the background (see below) |
-| `remember`, `forget` | Long-term memory notes |
+| `remember` | Long-term memory notes (`/memory` lists them, `/forget N` deletes one) |
 | `schedule_task`, `list_schedules`, `cancel_schedule` | Run tasks later, once or on repeat |
 | `web_search`, `fetch_url` | Search the web (DuckDuckGo) and read pages as text, without the screen |
 | `phone`, `shell` | Raw adb command / Linux command (for anything else) |
@@ -293,8 +291,8 @@ the AI gets those steps as a hint but still checks each screen.
 
 When a request has **exactly the same keywords** as a saved one, the route is **replayed directly**,
 without asking the AI at each step. The AI then checks the final screen and replies, and takes over
-if a step fails. Routes with a tap by coordinates aren't replayed. Calls, SMS, email, shell commands,
-contacts, memory and schedules are never saved. `/shortcuts` lists them, `/delshortcut N` deletes one.
+if a step fails. Routes with a tap by coordinates aren't replayed. Shell commands, memory notes,
+schedules, approvals, voice messages and pictures are never saved. `/shortcuts` lists them, `/delshortcut N` deletes one.
 
 ### After a reboot
 
@@ -491,13 +489,11 @@ No touchscreen? Use a mouse through `scrcpy`, or a USB-OTG mouse, for any on-scr
 
 Close and reopen Termux once so the service manager starts.
 
-For audio, contacts and SMS (Termux:API from GitHub releases too), **[computer]**:
+For audio (Termux:API from GitHub releases too), **[computer]**:
 
 ```sh
 adb install -g termux-api-app_*.apk
 adb shell pm grant com.termux.api android.permission.RECORD_AUDIO
-adb shell pm grant com.termux.api android.permission.READ_CONTACTS
-adb shell pm grant com.termux.api android.permission.SEND_SMS   # only if the phone has a SIM
 ```
 
 and **[termux]** `pkg install -y termux-api`.

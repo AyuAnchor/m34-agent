@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from device import GENERATED_DIR, MAX_AUDIO_S, MEDIA_DIR, SCREEN_PATH, SETTINGS_PAGES, TOGGLES, Device, adb, is_temporary, phone_line_problem, ready_to_send
+from device import GENERATED_DIR, MAX_AUDIO_S, MEDIA_DIR, SCREEN_PATH, SETTINGS_PAGES, Device, adb, is_temporary, ready_to_send
 from net import ConnectionPool
 import web
 from store import STATE_DIR, Memory, Schedules, Shortcuts, Usage, read_json, write_atomically
@@ -56,7 +56,7 @@ SAME_SPOT = 25  # taps closer than about this on the 0-1000 scale count as repea
 # These take the phone (device lock) for the rest of the task; other tools never wait for a watch or command.
 SCREEN_TOOLS = {
     "look", "tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url", "take_photo", "record_video",
-    "record_audio", "send_screenshot", "phone", "make_call", "send_email",
+    "record_audio", "send_screenshot", "phone",
 }
 DEVICE_WAIT_S = 60  # a watch clip or quick command finishes well within this
 SHOWS_SCREEN_AFTER = {"tap", "type_text", "scroll", "key", "open_app", "open_settings", "open_url"}
@@ -92,9 +92,8 @@ OWNER_PHOTO = "The owner's photo:"
 TAPPED = re.compile(r'^(?:Tapped|Long-pressed) (?:\[\d+\] (.+?)|"(.+?)")\.$', re.MULTILINE)
 # Never saved into shortcuts: read-only, and anything sensitive or personal.
 SHORTCUT_SKIP = {
-    "look", "phone_status", "list_schedules", "remember", "forget", "schedule_task", "cancel_schedule",
-    "make_call", "send_sms", "send_email", "shell", "search_contacts", "watch_motion", "listen", "stop_watch",
-    "ask_owner", "send_voice", "generate_image",
+    "look", "phone_status", "list_schedules", "remember", "schedule_task", "cancel_schedule", "shell",
+    "watch_motion", "listen", "stop_watch", "ask_owner", "send_voice", "generate_image",
 }
 MAX_SHORTCUT_STEPS = 8  # longer runs aren't worth saving
 MAX_DONE_CHECKS = 2  # after a second failed check the reply goes out anyway (not saved as a route)
@@ -162,7 +161,7 @@ only on apps whose element list shows labels like it; in games, whose element li
 every tap goes by x/y on the screenshot, since there is no text to find.
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
-settings status, calls, messages, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
+settings status, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
 - To search YouTube, the Play Store or Maps, open_url their search link (it opens in the app, one step \
 instead of tapping and typing): https://www.youtube.com/results?search_query=WORDS, \
 https://play.google.com/store/search?q=WORDS&c=apps, https://www.google.com/maps/search/?api=1&query=WORDS.
@@ -306,12 +305,6 @@ TOOLS = [
         "Read volumes, brightness, screen timeout, auto-rotate, dark mode, Wi-Fi, airplane mode, Bluetooth, "
         "do not disturb and battery.",
     ),
-    function(
-        "toggle_setting",
-        "Turn a setting on or off directly.",
-        {"setting": prop("string", enum=list(TOGGLES)), "on": prop("boolean")},
-        ("setting", "on"),
-    ),
     function("set_brightness", "Set screen brightness.", {"percent": prop("integer", "0-100")}, ("percent",)),
     function("speak", "Say something out loud on the phone.", {"text": prop("string")}, ("text",)),
     function(
@@ -335,25 +328,6 @@ TOOLS = [
             "shape": prop("string", "square unless asked; portrait for a phone wallpaper", enum=["square", "portrait", "landscape"]),
         },
         ("prompt",),
-    ),
-    function("search_contacts", "Find contacts by name or number.", {"query": prop("string")}, ("query",)),
-    function(
-        "make_call",
-        "Call a number (owner approves).",
-        {"number": prop("string")},
-        ("number",),
-    ),
-    function(
-        "send_sms",
-        "Send an SMS (owner approves).",
-        {"number": prop("string"), "text": prop("string")},
-        ("number", "text"),
-    ),
-    function(
-        "send_email",
-        "Write an email in the mail app, then tap Send (owner approves first).",
-        {"to": prop("string"), "subject": prop("string"), "body": prop("string")},
-        ("to", "subject", "body"),
     ),
     function(
         "watch_motion",
@@ -414,7 +388,6 @@ TOOLS = [
         ("command",),
     ),
     function("remember", "Save a short note to long-term memory.", {"text": prop("string")}, ("text",)),
-    function("forget", "Delete a memory note by number.", {"id": prop("integer")}, ("id",)),
     function(
         "schedule_task",
         "Schedule a task for later (owner approves).",
@@ -1053,24 +1026,9 @@ class Agent:
             "set_brightness": lambda a, m: self.device.set_brightness(as_int(a.get("percent")) or 0),
             "phone_status": lambda a, m: self.device.status(),
             "open_settings": lambda a, m: self.device.open_settings(str(a.get("page", "")), str(a.get("app") or "")),
-            "toggle_setting": lambda a, m: self.device.toggle(str(a.get("setting", "")), as_bool(a.get("on"))),
             "speak": lambda a, m: self.device.speak(str(a.get("text", ""))),
             "send_voice": lambda a, m: self.send_voice(str(a.get("text", "")), str(a.get("style") or "")),
             "generate_image": lambda a, m: self.generate_image(str(a.get("prompt", "")), str(a.get("shape") or "square")),
-            "search_contacts": lambda a, m: self.device.search_contacts(str(a.get("query", ""))),
-            "make_call": lambda a, m: phone_line_problem() or self.approved(
-                f"Call {a.get('number')}?", lambda: self.device.make_call(str(a.get("number", "")))
-            ),
-            "send_sms": lambda a, m: phone_line_problem() or self.approved(
-                f"Send SMS to {a.get('number')}?\n{a.get('text', '')}",
-                lambda: self.device.send_sms(str(a.get("number", "")), str(a.get("text", ""))),
-            ),
-            "send_email": lambda a, m: self.approved(
-                f"Send email to {a.get('to')}?\nSubject: {a.get('subject', '')}\n\n{a.get('body', '')}",
-                lambda: self.device.compose_email(
-                    str(a.get("to", "")), str(a.get("subject", "")), str(a.get("body", ""))
-                ),
-            ),
             "type_text": lambda a, m: self.device.type_text(
                 str(a.get("text", "")), as_bool(a.get("submit")), as_bool(a.get("clear"))
             ),
@@ -1097,7 +1055,6 @@ class Agent:
             "phone": lambda a, m: self.phone(str(a.get("args", ""))),
             "shell": lambda a, m: self.shell(str(a.get("command", ""))),
             "remember": lambda a, m: self.remember(str(a.get("text", ""))),
-            "forget": lambda a, m: self.forget(as_int(a.get("id"))),
             "schedule_task": lambda a, m: self.schedule(
                 str(a.get("task", "")), str(a.get("when", "")), str(a.get("repeat", "once"))
             ),
@@ -1403,9 +1360,6 @@ class Agent:
         self.send_file(SCREEN_PATH, caption)
         return "Sent."
 
-    def approved(self, question: str, action: Callable[[], str]) -> str:
-        return action() if self.ask_owner(question) else "The owner denied this action."
-
     def phone(self, args: str) -> str:
         if LOCKOUT.search(args):
             return "Blocked: this could cut off remote access to the phone."
@@ -1437,9 +1391,6 @@ class Agent:
         item = self.memory.add(text)
         self.notify(f"Remembered #{item['id']}: {item['text']}")
         return f"Saved as note {item['id']}."
-
-    def forget(self, item_id: int | None) -> str:
-        return f"Deleted note {item_id}." if item_id and self.memory.remove(item_id) else "No such note."
 
     def schedule(self, task: str, when: str, repeat: str) -> str:
         try:  # validate everything before asking, and store exactly the time the owner approved
