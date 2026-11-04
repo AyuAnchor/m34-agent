@@ -329,13 +329,21 @@ class Element:
 STATUS_BAR_BOTTOM = 80  # px; status bar icons (clock, notification icons, signal) sit above this
 NAVIGATION_BUTTONS = {"back", "home", "recent_apps"}  # the key tool presses these
 EDGE_PANEL_HANDLE = {"trigger_container", "trigger_view"}
+# Samsung's Game Booster floats a button over every game. On a game's (otherwise empty) element list it was
+# the only thing to tap by number, and the AI turned on its touch lock that way, after which no tap reached
+# the game. Google Play Games' Sidekick tab sits over games too.
+GAME_BOOSTER = "com.samsung.android.game.gametools"
+SIDEKICK = "Google Play Games Sidekick"
+TOUCH_LOCK = f"{GAME_BOOSTER}:id/fl_locker_icon"  # "Touch protection, Drag Lock icon to unlock"
 
 
-def is_chrome(package: str, resource: str, bounds: list[int]) -> bool:
-    """Status bar icons, navigation buttons and the edge panel handle: on every screen, never the target.
+def is_chrome(package: str, resource: str, bounds: list[int], label: str = "") -> bool:
+    """Status bar icons, navigation buttons, the edge panel handle and game overlays: never the target.
     The pulled-down notification shade is also system UI but sits lower, so it stays."""
     if package == "com.android.systemui":
         return bounds[3] <= STATUS_BAR_BOTTOM or resource in NAVIGATION_BUTTONS
+    if package == GAME_BOOSTER or label == SIDEKICK:
+        return True
     return package == "com.sec.android.app.launcher" and resource in EDGE_PANEL_HANDLE
 
 
@@ -370,6 +378,7 @@ class Device:
         self.looks: list[tuple[list[Element], Image.Image | None]] = []
         self.screen_note = ""
         self.receive_lock = threading.Lock()
+        self.touch_lock: list[int] | None = None  # Game Booster's lock icon bounds while its touch lock shows
         self.automator = None
         self.apps: dict[str, str] = {}  # package -> its launcher component
         self._specs = ""
@@ -423,6 +432,8 @@ class Device:
             short, long = self.portrait
             self.width, self.height = (long, short) if rotation in ("1", "3") else (short, long)
         self.packages = {package for node in root.iter("node") if (package := node.get("package"))}
+        locker = next((node for node in root.iter("node") if node.get("resource-id") == TOUCH_LOCK), None)
+        self.touch_lock = [int(n) for n in re.findall(r"\d+", locker.get("bounds", ""))] if locker is not None else None
         elements: list[Element] = []
         seen = set()
         # Chrome shows an empty "Web View" while a page loads (~0.5-1.5 s) and sometimes keeps it (seen on
@@ -442,7 +453,7 @@ class Device:
             if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
                 continue  # hidden or zero-size
             resource = (node.get("resource-id") or "").rsplit("/", 1)[-1]
-            if is_chrome(node.get("package", ""), resource, bounds):
+            if is_chrome(node.get("package", ""), resource, bounds, own_label):
                 continue
             label = own_label or node_label(node)
             key = (tuple(bounds), label)
@@ -499,6 +510,9 @@ class Device:
         or when the list can't describe the screen (games, camera, icon-only buttons). A screenshot about
         doubles the AI's answer time, and most screens read fine as a list."""
         self.elements = self.read_stable_elements()
+        unlocked = self.touch_lock is not None and self.unlock_touches()
+        if unlocked:
+            self.elements = self.read_stable_elements()
         self.changed = False
         lines = [
             f"[{n}] {e.label or '(no label)'}{f' #{e.resource}' if e.resource else ''} {e.flags}".rstrip()
@@ -506,6 +520,9 @@ class Device:
         ]
         listing = "\n".join(lines) or "(no elements found: tap with x/y on the 0-1000 scale)"
         text = f"Elements on screen (tap by number):\n{listing}"
+        if unlocked:
+            text = ("(Samsung's game touch lock was on, which swallows every tap: the last tap didn't reach the "
+                    f"app. It's unlocked now.)\n{text}")
         image = self.snapshot() if picture or self.unreadable() else None
         seen = (self.elements, image.convert("L").resize(THUMB_SIZE) if image else None)
         self.screen_note = (
@@ -517,6 +534,16 @@ class Device:
         if image:
             return text, to_data_url(self.mark(image))
         return f"{text}\n(No screenshot this time: call look to see the picture.)", None
+
+    def unlock_touches(self) -> bool:
+        """Drag Game Booster's lock icon away (it wants a drag of about a second; a quick swipe was ignored)."""
+        x1, y1, x2, y2 = self.touch_lock
+        x, y = (x1 + x2) // 2, (y1 + y2) // 2
+        self.swipe(x, y, x, min(self.height - 1, y + self.height * 35 // 100), 1000)
+        time.sleep(1)
+        self.read_elements()
+        log.info(f"Game Booster touch lock {'still on' if self.touch_lock else 'unlocked'}")
+        return self.touch_lock is None
 
     def matches(self, seen: tuple[list["Element"], Image.Image | None], earlier: tuple[list["Element"], Image.Image | None]) -> bool:
         """Whether two looks show the same screen: same elements, and same picture when both have one. Without
@@ -584,6 +611,11 @@ class Device:
     ) -> str:
         if text:
             target = self.find_text(text)
+            if target is None and self.unreadable():
+                return (
+                    f"No element with text {text!r}: this screen has no readable text (a game or a picture), so "
+                    "nothing was tapped. Tap it by x/y on the screenshot instead."
+                )
             if target is None:
                 return f"No element with text {text!r} on screen. Call look to see what is there."
             px, py = target.center

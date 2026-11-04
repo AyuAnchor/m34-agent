@@ -140,7 +140,14 @@ big enough to stay readable; Nemotron and Flash Lite picked the same numbered bo
 The copy sent to you with `/screen` stays full size.
 
 The list leaves out what's on every screen (status bar icons, the Back/Home/Recents buttons, the edge
-panel handle; the `key` tool presses those) and folds each settings row's title and switch into one
+panel handle; the `key` tool presses those) and what floats over games: Samsung's Game Booster button and
+Google Play Games' Sidekick tab. On a game's otherwise empty list those were the only things to tap by
+number, and the AI once turned on Game Booster's touch lock that way: it dims the screen and swallows every
+tap until its lock icon is dragged. If that lock shows anyway, the screen read drags it open (a ~1 s drag;
+a quick swipe is ignored) and tells the AI its last tap didn't land. A tap by text on a screen with no
+readable text says so ("tap it by x/y on the screenshot") instead of only "not found". Once a screenshot or
+your photo is part of a task, only models that see images are asked, so a text-only backup can't act blind.
+Failed actions and "the screen didn't change" notes are logged, so a loop can be traced afterwards and folds each settings row's title and switch into one
 line with its state (`Eye comfort shield unchecked`). On Settings pages that cuts the list by ~60%.
 
 Older screen lists are compacted to just their text ("earlier screen showed: Android version; 16"):

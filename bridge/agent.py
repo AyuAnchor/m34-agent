@@ -162,7 +162,8 @@ numbers change after every action.
 - Each of your steps takes a few seconds, and some things close by themselves in that time (menus, \
 popups, a game's panel for the building you tapped). When a tap opens something you then have to tap in, \
 make both taps in the same reply: they run about half a second apart. The second tap goes by text \
-(text="Upgrade") when you know the label, or by x/y where that button always appears.
+only on apps whose element list shows labels like it; in games, whose element list is (nearly) empty, \
+every tap goes by x/y on the screenshot, since there is no text to find.
 - If the screen is off or black, press the wakeup key.
 - Prefer a dedicated tool over tapping through apps whenever one fits (camera, alarms, volume, \
 settings status, calls, messages, camera and sound watches). For Settings, start with open_settings at the right page. send_file delivers files to the owner.
@@ -1184,13 +1185,16 @@ class Agent:
                 return "Stopped."
             self.on_step()
             try:
-                # The quick first-step models can't see images.
+                # The quick first-step models can't see images. Once a screenshot or the owner's photo is in
+                # the conversation, only models that see images are asked: a text-only backup once won the race
+                # on a game screen and pressed Back blind.
                 fast = step == 0 and not images
-                message, model = self.router.complete(messages, fast_first=fast, on_text=self.on_text)
+                pictured = any(isinstance(m.get("content"), list) for m in messages)
+                message, model = self.router.complete(messages, fast_first=fast, on_text=self.on_text, vision=pictured)
                 if step == 0 and model.fast and is_refusal(message):
                     # Quick models refuse some things the main models handle within the rules; let those decide.
                     log.info(f"{model.label} refused; asking the main models instead")
-                    message, model = self.router.complete(messages, on_text=self.on_text)
+                    message, model = self.router.complete(messages, on_text=self.on_text, vision=pictured)
             except NoModelAvailable as error:
                 return str(error)
             messages.append(message)
@@ -1341,9 +1345,13 @@ class Agent:
         if isinstance(result, tuple):
             return result
         result = str(result)[-MAX_TOOL_OUTPUT:]
+        if result.startswith(FAILED_RESULTS):
+            log.info(f"{name} failed: {result[:120]}")
         if show_screen and name in SHOWS_SCREEN_AFTER:  # saves the AI a separate look round trip (~1-3 s each)
             screen, image = self.device.look()
             note = SCREEN_NOTES.get(self.device.screen_note, "") if name == "tap" else ""
+            if note:
+                log.info(f"{name}: screen {self.device.screen_note} after it")
             return f"{result}{note}\n\n{screen}", image
         return result, None
 
