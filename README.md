@@ -523,7 +523,19 @@ for p in com.samsung.android.game.gametools \
   com.google.ar.core com.google.android.feedback com.google.android.apps.accessibility.voiceaccess \
   com.google.android.googlequicksearchbox; do adb shell pm disable-user --user 0 $p; done
 adb shell pm uninstall --user 0 com.google.android.apps.bard  # Gemini can't be disabled; undo: pm install-existing
+adb shell pm disable-user --user 0 com.aura.oobe.samsung      # AppCloud (ironSource): app-install ads, auto-installs
+# No notifications from apps whose notifications only clutter the screen (promos, game reminders).
+# Undo one: adb shell appops set --user 0 <package> POST_NOTIFICATION allow
+for p in com.android.vending com.google.android.youtube com.google.android.apps.youtube.music \
+  com.google.android.apps.photos com.google.android.apps.maps com.google.android.keep com.google.android.apps.docs \
+  com.supercell.clashofclans com.fingersoft.hillclimb; do
+  adb shell pm revoke $p android.permission.POST_NOTIFICATIONS; adb shell appops set --user 0 $p POST_NOTIFICATION ignore
+done
 ```
+
+Notifications stay on for Android, the clock (alarms), Phone, Messages, Termux, Shizuku and Tailscale.
+Samsung's memory saver can't be muted on its own: it runs as the system user, so blocking it would mute
+Android's own notifications too.
 
 Also turn off Google Play Games' Sidekick tab, which sits over games: Play Store → profile picture →
 Settings → General → Play Games Sidekick → Show Play Games Sidekick off. Check that Settings → Device care →
