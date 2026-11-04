@@ -36,6 +36,8 @@ MAX_HISTORY = 20
 APPROVAL_TIMEOUT_S = 15 * 60
 PROGRESS_LINES = 8
 OUTAGE_NOTICE_S = 10 * 60  # tell the owner once when the main models have been failing this long
+OFFLINE_NOTICE_MIN_S = 60  # shorter Telegram outages aren't reported
+OFFLINE_NOTICE_EVERY_S = 3600  # at most one "back online" message this often; the next one counts the rest
 PROGRESS_EDIT_S = 2.0
 SCHEDULER_TICK_S = 20
 WARM_EVERY_S = 120  # keep a fresh connection to Telegram and each AI provider ready
@@ -110,6 +112,8 @@ class Bridge:
         self.transcribe = Transcriber(providers["groq"]) if providers.get("groq") else None
         self.busy = False
         self.offline_since = 0.0  # when Telegram stopped answering; 0 while online
+        self.offline_noticed = 0.0  # when the owner was last told about an outage
+        self.unreported_outages: list[float] = []  # minutes offline, per outage not yet reported
         self.cancel = threading.Event()
         self.approvals: dict[str, tuple[threading.Event, list[bool]]] = {}
         self.task = ""
@@ -258,14 +262,29 @@ class Bridge:
                 time.sleep(5)
                 continue
             if self.offline_since:
-                log.info(f"back online after {(time.time() - self.offline_since) / 60:.1f} min")
-                self.offline_since = 0.0
+                self.back_online()
             for update in updates:
                 offset = update["update_id"] + 1
                 try:
                     self.handle(update)
                 except Exception:
                     log.exception("failed to handle update")
+
+    def back_online(self) -> None:
+        now, since = time.time(), self.offline_since
+        self.offline_since = 0.0
+        log.info(f"back online after {(now - since) / 60:.1f} min")
+        if now - since < OFFLINE_NOTICE_MIN_S:
+            return
+        self.unreported_outages.append((now - since) / 60)
+        if now - self.offline_noticed < OFFLINE_NOTICE_EVERY_S or not self.owner:
+            return
+        text = f"Back online: no internet for {self.unreported_outages[-1]:.0f} min (since {datetime.fromtimestamp(since, self.schedules.tz):%H:%M})."
+        if earlier := self.unreported_outages[:-1]:
+            text += f" Also offline {len(earlier)} other time{'s' if len(earlier) > 1 else ''} before that ({sum(earlier):.0f} min in all)."
+        if self.notify(text):
+            self.offline_noticed = now
+            self.unreported_outages = []
 
     def command_table(self) -> dict[str, Callable[[], None]]:
         """Built-in commands without arguments."""

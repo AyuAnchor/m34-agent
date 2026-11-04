@@ -220,6 +220,9 @@ Every 2 minutes the bot checks the battery (adb, or Termux:API if adb isn't up).
 Telegram alert (with whether it's charging); once it's back to 20% it says so and re-arms. Change
 `BATTERY_LOW` / `BATTERY_REARM` in `bridge.py`.
 
+When the phone gets its internet back after a minute or more offline, the bot tells you how long it was
+gone, at most once an hour; that message also counts the outages it didn't report in between.
+
 ### Free tier limits (October 2026)
 
 | Model | Per minute | Tokens / min | Per day |
