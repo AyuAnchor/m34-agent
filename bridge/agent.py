@@ -25,7 +25,11 @@ ENDPOINTS = {  # provider -> (host, path) of its OpenAI-compatible chat endpoint
     "gemini": ("generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"),
     "groq": ("api.groq.com", "/openai/v1/chat/completions"),
     "nvidia": ("integrate.api.nvidia.com", "/v1/chat/completions"),
+    "ovh": ("oai.endpoints.kepler.ai.cloud.ovh.net", "/v1/chat/completions"),
 }
+# Used without a key unless the config sets the provider to false. OVHcloud's anonymous lane: 2 requests a
+# minute per model and IP address, no account.
+KEYLESS = {"ovh"}
 COOLDOWNS_PATH = STATE_DIR / "cooldowns.json"
 CHOSEN_MODEL_PATH = STATE_DIR / "model.json"  # the owner's pick from /model; none means automatic
 # Quotas used up "per day" free up sooner than the documented reset (Groq's window rolls, and Gemini has
@@ -33,7 +37,7 @@ CHOSEN_MODEL_PATH = STATE_DIR / "model.json"  # the owner's pick from /model; no
 DAILY_RECHECK_S = 3600
 MAX_TROUBLE_WAIT_S = 900  # server errors and network failures back off 1, 2, 4... minutes, up to this
 TROUBLE_STALE_S = 900  # a problem not seen again for this long counts as over
-PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq", "nvidia": "NVIDIA"}
+PROVIDER_NAMES = {"gemini": "Google", "groq": "Groq", "nvidia": "NVIDIA", "ovh": "OVHcloud"}
 # When a provider is overloaded, a model may still answer but take minutes (seen: 123 s for one step).
 MODEL_TIMEOUT_S = 40  # give up and try the next model; healthy answers take under ~15 s
 SLOW_ANSWER_S = 25  # an answer slower than this sets the model aside for a while
@@ -551,6 +555,9 @@ MODELS = [
     Model("gemini#2", "gemini-flash-lite-latest", vision=True, daily=500),
     Model("gemini", "gemini-3.1-flash-lite", vision=True, daily=500),
     Model("gemini#2", "gemini-3.1-flash-lite", vision=True, daily=500),
+    # 82% on AndroidWorld (phone control). Default thinking took up to 36 s for a step; low, 2-7 s.
+    Model("ovh", "Qwen3.8-27B", vision=True, effort="low"),
+    Model("ovh", "Qwen3.6-27B", vision=True, effort="low"),
     Model("nvidia", "mistralai/mistral-large-4-1t-a52b", vision=True, daily=10000),
     Model("groq", "qwen/qwen3.8-27b", vision=True, fast=2, daily=1000),
     Model("groq", "openai/gpt-oss-120b", vision=False, effort="low", fast=1, daily=1000),
@@ -564,6 +571,8 @@ TITLES = {
     "gemini-3.1-flash-lite": "Gemini 3.1 Flash Lite",
     "mistralai/mistral-large-4-1t-a52b": "Mistral Large 4 (NVIDIA)",
     "qwen/qwen3.8-27b": "Qwen 3.8 27B (Groq)",
+    "Qwen3.8-27B": "Qwen 3.8 27B (OVHcloud)",
+    "Qwen3.6-27B": "Qwen 3.6 27B (OVHcloud)",
     "openai/gpt-oss-120b": "GPT-OSS 120B (Groq, can't see images)",
 }
 
@@ -663,7 +672,7 @@ class Router:
     def __init__(self, keys: dict[str, str], usage: Usage | None = None) -> None:
         self.keys = keys
         self.usage = usage
-        self.models = [model for model in MODELS if keys.get(model.provider)]
+        self.models = [model for model in MODELS if keys.get(model.provider, model.provider in KEYLESS)]
         families = {model.family for model in self.models}
         self.pools = {family: ConnectionPool(host) for family, (host, _) in ENDPOINTS.items() if family in families}
         self.last_failure = ""
@@ -857,11 +866,9 @@ class Router:
             body["stream"] = True
         if model.effort:
             body["reasoning_effort"] = model.effort
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.keys[model.provider]}",
-            "User-Agent": "m34-agent/1.0",  # Groq's CDN rejects Python's default agent
-        }
+        headers = {"Content-Type": "application/json", "User-Agent": "m34-agent/1.0"}  # Groq's CDN rejects Python's default agent
+        if isinstance(key := self.keys.get(model.provider), str) and key:
+            headers["Authorization"] = f"Bearer {key}"
         _, path = ENDPOINTS[model.family]
         start = time.time()
         status, response_headers, data = self.pools[model.family].request(

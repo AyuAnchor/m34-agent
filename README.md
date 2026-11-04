@@ -219,14 +219,23 @@ projects used only to multiply free quota can count as; the risk is Google suspe
 4. NVIDIA `nvidia/nemotron-3.5-super-vl-120b-a12b` (sees images)
 5. `gemini-flash-lite-latest` (sees images)
 6. `gemini-3.1-flash-lite` (sees images)
-7. NVIDIA `mistralai/mistral-large-4-1t-a52b` (sees images)
-8. Groq `qwen/qwen3.8-27b` (sees images)
-9. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
+7. OVHcloud `Qwen3.8-27B` (sees images)
+8. OVHcloud `Qwen3.6-27B` (sees images)
+9. NVIDIA `mistralai/mistral-large-4-1t-a52b` (sees images)
+10. Groq `qwen/qwen3.8-27b` (sees images)
+11. Groq `openai/gpt-oss-120b` (text only, uses `ui_dump`)
 
 NVIDIA's models are used only when `"nvidia"` is in the config. Nemotron answered agent steps in ~2 s in
 testing (November 2026), as fast as Flash Lite, with a much larger daily allowance. Other NVIDIA models
 that see images (DeepSeek V4.1 Flash, Gemma 4) often took over 40 s, so they aren't used. NVIDIA calls
 its free API a trial for prototyping and may throttle it when busy.
+
+OVHcloud's AI Endpoints serve Qwen anonymously: no account and no key, 2 requests a minute per model and
+IP address (set `"ovh": false` in the config to leave them out). Qwen3.8-27B scores 82% on AndroidWorld,
+the phone-control benchmark; both models got all 8 test steps right (timer, tapping an icon on a
+screenshot) in 2-7 s with low thinking (default thinking took up to 36 s). The 2-a-minute limit makes
+them backups, not main models: when they're used up the router waits out OVHcloud's retry hint and
+the others carry on.
 
 Each model has its own daily quota, so a model is listed once under one name: Google's deprecated
 IDs (`gemini-3.7-flash`, `gemini-3.5-flash`) and the `-latest` aliases share quota with the model
@@ -368,6 +377,7 @@ won't match and it stops without tapping.
 | Gemini 3.5 Flash Lite (`gemini-flash-lite-latest`) | 15 | 250K | 500 |
 | Gemini 3.1 Flash Lite (`gemini-3.1-flash-lite`) | 15 | 250K | 500 |
 | NVIDIA (all models together) | up to 40 | - | ~10,000 |
+| OVHcloud `Qwen3.8-27B`, `Qwen3.6-27B` (no key) | 2 each, per IP address | - | - |
 | Groq `openai/gpt-oss-120b` | ~30 | 8K | 1,000 |
 | Groq `qwen/qwen3.8-27b` | ~30 | 8K (7K input) | 1,000 |
 | Groq `whisper-large-v3` (voice notes) | 20 | - | 2,000 (8 h of audio) |
